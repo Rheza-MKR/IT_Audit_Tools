@@ -1,0 +1,14 @@
+1. Data anomaly 
+produces data anomaly based on time/date log, for example :
+- logs made within several seconds with the same id and input
+(several attributes might be added in the future)
+
+2. CSV summarizer
+* report of missing data and additional data cleaning:
+    - missing primary key or foreign key (foreign key might not be relevant beofre reconciliation)
+    - duplicate value (excluding primary key)
+* number of rows 
+
+3. several keywords search from several columns
+
+4. 

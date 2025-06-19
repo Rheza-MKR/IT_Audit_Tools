@@ -4,11 +4,11 @@ import inquirer
 
 def select_csv_file(prompt):
     """Prompt user to select a CSV file."""
-    files = [f for f in os.listdir('.') if f.endswith('.csv')]
+    files = [f for f in os.listdir('./data/') if f.endswith('.csv')]
     while not files:
         print("No CSV files found. Please add a CSV file and try again.")
         input("Press Enter to retry...")
-        files = [f for f in os.listdir('.') if f.endswith('.csv')]
+        files = [f for f in os.listdir('./data/') if f.endswith('.csv')]
 
     questions = [inquirer.List('file', message=prompt, choices=files)]
     answer = inquirer.prompt(questions)
@@ -17,7 +17,7 @@ def select_csv_file(prompt):
 def get_columns(csv_file):
     """Get column names from a CSV file."""
     try:
-        df = pd.read_csv(csv_file, encoding='utf-8', delimiter=',', on_bad_lines='skip', nrows=1)
+        df = pd.read_csv('./data/'+ csv_file, encoding='utf-8', delimiter=',', on_bad_lines='skip', nrows=1)
         return df.columns.tolist()
     except Exception as e:
         print(f"Error reading {csv_file}: {e}")
@@ -85,8 +85,8 @@ def select_export_format():
 def reconcile_files(file1, file2, key_column1, key_column2, reconcile_method, num_chars):
     """Perform reconciliation between two CSV files."""
     try:
-        df1 = pd.read_csv(file1, encoding='utf-8', delimiter=',', on_bad_lines='skip')
-        df2 = pd.read_csv(file2, encoding='utf-8', delimiter=',', on_bad_lines='skip')
+        df1 = pd.read_csv('./data/'+file1, encoding='utf-8', delimiter=',', on_bad_lines='skip')
+        df2 = pd.read_csv('./data/'+file2, encoding='utf-8', delimiter=',', on_bad_lines='skip')
     except Exception as e:
         print(f"Error reading files: {e}")
         return
@@ -129,11 +129,11 @@ def reconcile_files(file1, file2, key_column1, key_column2, reconcile_method, nu
         output_filename = f"unmatch-{os.path.basename(file1)}"
 
         if export_format == "CSV":
-            unmatched_1.to_csv(output_filename, index=False)
+            unmatched_1.to_csv('./data/'+output_filename, index=False)
             print(f"\nUnmatched records from {file1} saved as {output_filename}.")
         elif export_format == "XLSX":
             output_filename = output_filename.replace(".csv", ".xlsx")
-            unmatched_1.to_excel(output_filename, index=False)
+            unmatched_1.to_excel('./data/'+output_filename, index=False)
             print(f"\nUnmatched records from {file1} saved as {output_filename}.")
 
         # Ask if the user wants to go back to the main menu instead of undoing the operation

@@ -8,7 +8,7 @@ console = Console()
 
 def list_csv_files():
     """List all CSV files in the current directory."""
-    files = [f for f in os.listdir() if f.endswith('.csv')]
+    files = [f for f in os.listdir('./data/') if f.endswith('.csv')]
     return files
 
 def select_csv_file():
@@ -28,7 +28,7 @@ def select_csv_file():
 def read_csv_safely(file):
     """Read CSV file with automatic delimiter detection and encoding handling."""
     try:
-        df = pd.read_csv(file, encoding="utf-8", delimiter=None, on_bad_lines="skip")
+        df = pd.read_csv('./data/'+file, encoding="utf-8", delimiter=None, on_bad_lines="skip")
         
         # Check if columns are incorrectly parsed as a single string
         if len(df.columns) == 1:
@@ -106,10 +106,10 @@ def export_results(results):
     file_name = questionary.text("Enter the file name (without extension):").ask()
 
     if file_format == "CSV":
-        results.to_csv(file_name + ".csv", index=False)
+        results.to_csv('./data/'+file_name + ".csv", index=False)
         console.print(f"[bold green]Results exported to {file_name}.csv[/bold green]")
     elif file_format == "XLSX":
-        results.to_excel(file_name + ".xlsx", index=False)
+        results.to_excel('./data/'+file_name + ".xlsx", index=False)
         console.print(f"[bold green]Results exported to {file_name}.xlsx[/bold green]")
 
 def main():
