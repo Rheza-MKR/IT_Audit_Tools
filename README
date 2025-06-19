@@ -6,12 +6,12 @@
 
 ### Installation
 
-Clone the repository and install the dependencies:
+### Clone the repository and install the dependencies:
 git clone https://github.com/your-username/IT_Audit_Tools.git
 cd IT_Audit_Tools
 pip install -r requirements.txt
 
-Usage:
+### Usage:
 python -m venv venv
 source venv/bin/activate
 Usage python3 main.py
