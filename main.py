@@ -3,6 +3,7 @@ import os
 from pyfiglet import figlet_format
 import search  # Import search.py
 import recon   # Import recon.py
+import summarizer
 
 def display_banner():
     """Display ASCII art title and watermark"""
@@ -15,7 +16,7 @@ def main_menu():
         inquirer.List(
             "choice",
             message="Select an option:",
-            choices=["Search Data", "Reconcile Data", "Exit"],
+            choices=["Search Data", "Reconcile Data", "Summarize Data","Exit"],
         )
     ]
     
@@ -32,6 +33,8 @@ def main():
             search.main()  # Correctly calls search.py's main function
         elif choice == "Reconcile Data":
             recon.main()  # Correctly calls recon.py's main function
+        elif choice == "Summarize Data":
+            summarizer.main()
         elif choice == "Exit":
             print("Exiting...")
             break
