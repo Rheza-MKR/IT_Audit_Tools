@@ -4,6 +4,7 @@ from pyfiglet import figlet_format
 import search  # Import search.py
 import recon   # Import recon.py
 import summarizer
+import upload
 
 def display_banner():
     """Display ASCII art title and watermark"""
@@ -35,6 +36,8 @@ def main():
             recon.main()  # Correctly calls recon.py's main function
         elif choice == "Summarize Data":
             summarizer.main()
+        elif choice == "Upload to Tableau":
+            upload.main()
         elif choice == "Exit":
             print("Exiting...")
             break
