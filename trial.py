@@ -11,39 +11,50 @@ console = Console()
 
 DATA_DIR = "./data"
 
-def read_csv_safely(path: str) -> pd.DataFrame | None:
-    """Read CSV with fallback encodings/delimiters.
-
-    Returns a DataFrame or None on fatal error.
-    """
+def read_csv(path: str) -> pd.DataFrame | None:
     try:
         df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
         if len(df.columns) == 1:
             df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
         return df
     except Exception as e:
-        console.print(f"[bold red]❌ Failed to read {path}: {e}[/bold red]")
+        console.print(f"[bold red] Failed to read {path}: {e}[/bold red]")
         return None
 
-def detect_near_duplicates(df: pd.DataFrame, timestamp_col: str, detail_cols: list[str], threshold_seconds: int = 3) -> pd.DataFrame:
-    """Return rows that are considered near‑duplicate.
-
-    A row is flagged if another row shares identical *detail_cols* and the
-    difference between their timestamps is **<= threshold_seconds** (default 3s).
-    """
+def detect_near_duplicates(df: pd.DataFrame, timestamp_col: str, detail_cols: list[str], threshold_seconds: int = 60) -> pd.DataFrame:
     work_df = df.copy()
     work_df[timestamp_col] = pd.to_datetime(work_df[timestamp_col], errors="coerce")
 
     work_df = work_df.dropna(subset=[timestamp_col])
-
     work_df = work_df.sort_values(by=detail_cols + [timestamp_col]).reset_index(drop=True)
 
     grouped = work_df.groupby(detail_cols, sort=False)
 
-    time_deltas = grouped[timestamp_col].diff().dt.total_seconds().abs()
-    near_dup_mask = time_deltas <= threshold_seconds
+    duplicate_indices = set()
+    for _, group in grouped:
+        timestamps = group[timestamp_col].to_list()
+        indices = group.index.to_list()
 
-    duplicates_df = work_df[near_dup_mask]
+        current_cluster = [indices[0]]
+
+        for i in range(1, len(timestamps)):
+            time_diff = abs((timestamps[i] - timestamps[i - 1]).total_seconds())
+
+            if time_diff <= threshold_seconds:
+                # Continue the cluster
+                current_cluster.append(indices[i])
+            else:
+                # If cluster size > 1, save it
+                if len(current_cluster) > 1:
+                    duplicate_indices.update(current_cluster)
+                # Start a new potential cluster
+                current_cluster = [indices[i]]
+
+        # Final cluster check
+        if len(current_cluster) > 1:
+            duplicate_indices.update(current_cluster)
+
+    duplicates_df = work_df.loc[sorted(duplicate_indices)].reset_index(drop=True)
     return duplicates_df
 
 
@@ -91,7 +102,7 @@ def export_dataframe(df: pd.DataFrame, default_name: str):
         return
     file_name = questionary.text("Enter file name (without extension):", default=default_name).ask()
     if not file_name:
-        console.print("[bold red]❌ No file name provided. Export aborted.[/bold red]")
+        console.print("[bold red] No file name provided. Export aborted.[/bold red]")
         return
     path = f"./data/{file_name}." + ("csv" if file_format == "CSV" else "xlsx")
     try:
@@ -99,19 +110,19 @@ def export_dataframe(df: pd.DataFrame, default_name: str):
             df.to_csv(path, index=False)
         else:
             df.to_excel(path, index=False)
-        console.print(f"[bold green]✅ Duplicates exported to {path}[/bold green]")
+        console.print(f"[bold green] Duplicates exported to {path}[/bold green]")
     except Exception as e:
-        console.print(f"[bold red]❌ Failed to export: {e}[/bold red]")
+        console.print(f"[bold red] Failed to export: {e}[/bold red]")
 
 
 def main():
-    console.print("[bold cyan]🚀 Duplicate‑Detection Tool (3‑second window)[/bold cyan]")
+    console.print("[bold cyan] Time Based Duplicate‑Detection Tool [/bold cyan]")
 
     file_path = choose_csv_file()
     if file_path is None:
         return
 
-    df = read_csv_safely(file_path)
+    df = read_csv(file_path)
     if df is None or df.empty:
         return
 
@@ -123,7 +134,7 @@ def main():
     if detail_cols is None:
         return
 
-    duplicates = detect_near_duplicates(df, ts_col, detail_cols, threshold_seconds=3)
+    duplicates = detect_near_duplicates(df, ts_col, detail_cols, threshold_seconds=60)
 
     if duplicates.empty:
         console.print("[bold green] No near‑duplicate transactions found![/bold green]")
