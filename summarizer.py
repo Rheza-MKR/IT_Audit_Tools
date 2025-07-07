@@ -1,6 +1,7 @@
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
+from pathlib import Path
 import questionary
 import os
 
@@ -60,9 +61,17 @@ def summarize_csv(df):
 
     console.print("[bold blue]Summary complete.[/bold blue]\n")
 
-def select_csv_from_data_folder():
+def _ask_directory() -> Path:
+    """Loop until the user enters an existing directory path."""
+    while True:
+        dir_path = Path(questionary.text("Enter the audit directory path:").ask()).expanduser()
+        if dir_path.is_dir():
+            return dir_path
+        console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")
+    
+def select_csv_from_data_folder(directory):
     """Choose a CSV file interactively from /data/."""
-    folder = "./data"
+    folder = directory
     files = [f for f in os.listdir(folder) if f.endswith(".csv")]
 
     if not files:
@@ -72,7 +81,7 @@ def select_csv_from_data_folder():
     file_choice = questionary.select("Select a CSV file to summarize:", choices=files + ["Back"]).ask()
     return None if file_choice == "Back" else os.path.join(folder, file_choice)
 
-def export_missing_rows(df):
+def export_missing_rows(df, directory):
     """Export rows with missing values in selected columns."""
     console.print("\n[bold cyan] Export Rows with Missing Data[/bold cyan]")
 
@@ -105,7 +114,7 @@ def export_missing_rows(df):
 
     file_name = questionary.text("Enter the file name (without extension):").ask()
 
-    export_path = f"./data/{file_name}." + ("csv" if file_format == "CSV" else "xlsx")
+    export_path = f".{directory}/{file_name}." + ("csv" if file_format == "CSV" else "xlsx")
 
     try:
         if file_format == "CSV":
@@ -116,7 +125,7 @@ def export_missing_rows(df):
     except Exception as e:
         console.print(f"[bold red] Export failed: {e}[/bold red]")
 
-def export_duplicate_rows(df):
+def export_duplicate_rows(df, directory):
     """Export duplicate rows based on user-selected subset of columns."""
     console.print("\n[bold cyan] Export Duplicate Rows[/bold cyan]")
 
@@ -146,7 +155,7 @@ def export_duplicate_rows(df):
 
     file_name = questionary.text("Enter the file name (without extension):").ask()
 
-    export_path = f"./data/{file_name}." + ("csv" if file_format == "CSV" else "xlsx")
+    export_path = f".{directory}/{file_name}." + ("csv" if file_format == "CSV" else "xlsx")
 
     try:
         if file_format == "CSV":
@@ -159,7 +168,8 @@ def export_duplicate_rows(df):
 
 def main():
     console.print("[bold cyan]CSV Summarizer Tool[/bold cyan]")
-    file_path = select_csv_from_data_folder()
+    dir_answer = _ask_directory()
+    file_path = select_csv_from_data_folder(dir_answer)
 
     if file_path:
         df = read_csv_safely(file_path)
@@ -171,10 +181,10 @@ def main():
             ).ask()
 
             if view_option == "Missing Values":
-                export_missing_rows(df)
+                export_missing_rows(df, dir_answer)
 
             elif view_option == "Duplicate Rows":
-                export_duplicate_rows(df)
+                export_duplicate_rows(df, dir_answer)
 
 if __name__ == "__main__":
     main()

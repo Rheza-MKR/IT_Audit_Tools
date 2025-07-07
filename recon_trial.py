@@ -56,7 +56,7 @@ def split_debit_credit(df: pd.DataFrame,
                        flag_col: str = "Debit or Credit") -> pd.DataFrame:
     """
     Add debit / credit columns while preserving every original column.
-    Returns the transformed dataframe without exporting.
+    Automatically clean 'platform fee debit' by removing 2500 debit rows and adjusting the next credit.
     """
     df = df.copy()
 
@@ -81,6 +81,21 @@ def split_debit_credit(df: pd.DataFrame,
         .where(pd.notna(df["credit"]), pd.NA)
         .replace({float('nan'): pd.NA})
     )
+
+    # Clean Platform Fee Debit
+    # Look for debit 2500 followed immediately by credit
+    platform_fee_mask = df["debit"].fillna(0).astype(float) == 2500
+
+    rows_to_drop = []
+    for idx in df[platform_fee_mask].index:
+        if idx + 1 in df.index and pd.notna(df.loc[idx + 1, "credit"]):
+            # Decrease the next credit by 2500
+            df.at[idx + 1, "credit"] = float(df.at[idx + 1, "credit"]) - 2500
+            # Mark current row for deletion
+            rows_to_drop.append(idx)
+
+    # Drop the platform fee debit rows
+    df = df.drop(index=rows_to_drop).reset_index(drop=True)
 
     # Move new columns to the front for readability
     cols = [c for c in ["debit", "credit"] if c in df.columns] + [c for c in df.columns if c not in ("debit", "credit")]
@@ -133,20 +148,64 @@ def _norm_col(series: pd.Series) -> pd.Series:
     # Vectorise with .map
     return series.map(_clean)
 
-# ────────────────────────── main function ──────────────────────────
-def audit_check() -> Dict[str, pd.DataFrame]:
+def _ask_strip_config(col_name: str) -> dict | None:
     """
-    Interactive audit assistant.
-
+    Ask whether to strip substrings from a text column.
     Returns
     -------
-    dict
+    dict | None
         {
-            'main_verified' : DataFrame (original main file + 'verified' boolean),
-            'unmatched'     : DataFrame (rows from main not found in source),
-            'duplicates'    : DataFrame (rows causing duplication issue)
+            'patterns'   : [list of substrings to remove],
+            'ignore_case': bool,
+            'alpha_only' : bool   # NEW – keep only A-Z afterwards?
         }
+        or None if the user declines.
     """
+    if not questionary.confirm(
+            f"Column '{col_name}' looks textual – remove specific substrings?",
+            default=False).ask():
+        return None
+
+    pats = questionary.text(
+        "Enter substrings to remove (comma-separated):"
+    ).ask()
+    patterns = [p.strip() for p in pats.split(",") if p.strip()]
+    if not patterns:
+        return None
+
+    ignore_case = questionary.confirm(
+        "Ignore case when searching for these substrings?",
+        default=True).ask()
+
+    alpha_only = questionary.confirm(
+        "After stripping, keep alphabetic characters only (A-Z)?",
+        default=False).ask()
+
+    return {
+        "patterns": patterns,
+        "ignore_case": ignore_case,
+        "alpha_only": alpha_only          # ← NEW flag
+    }
+
+
+def _apply_strip(series: pd.Series, cfg: dict) -> pd.Series:
+    """Apply the configured substring removal (+ optional alpha-filter)."""
+    flags = re.IGNORECASE if cfg["ignore_case"] else 0
+
+    def _strip(val: str) -> str:
+        s = str(val)
+        for pat in cfg["patterns"]:
+            s = re.sub(re.escape(pat), "", s, flags=flags)
+        if len(s)>23:
+            s = s[:23]
+        if cfg["alpha_only"]:
+            s = re.sub(r"[^A-Za-z]", "", s)
+        return s.strip().upper()
+
+    return series.map(_strip)
+
+# ────────────────────────── main function ──────────────────────────
+def audit_check() -> Dict[str, pd.DataFrame]:
     # 1 ─── choose directory & main items ────────────────────────────────────────
     audit_dir = _ask_directory()
 
@@ -169,26 +228,6 @@ def audit_check() -> Dict[str, pd.DataFrame]:
 
     main_df = _load_csv_safely(audit_dir / main_file_name)
 
-    # for col in ["Debit", "Credit"]:
-    #     if col in main_df.columns:
-    #         main_df[col] = (
-    #             main_df[col]                        # original values
-    #             .astype(str)
-    #             .str.replace(r"[^0-9.-,]", "", regex=True)   # keep digits, minus, dot
-    #             .str.replace(r"\\.00$", "", regex=True)     # drop trailing .00
-    #         )
-    #         # coerce to numeric → Int64 (nullable integer)
-    #         main_df[col] = (
-    #             pd.to_numeric(main_df[col], errors="coerce")   # invalid strings → NaN
-    #             .round(0)                                    # in case cents remain
-    #             .astype("Int64")                             # nullable integer dtype
-    #         )
-
-    # 2 ─── primary-key definition ──────────────────────────────────────────────
-    # pk_cols = _pick_many("Select primary-key column(s) (space to toggle):", list(main_df.columns))
-    # if not pk_cols:
-    #     console.print("[bold red]At least one primary-key column is required.[/bold red]")
-    #     return {}
 
     # 3 ─── date column & month signature ───────────────────────────────────────
     date_col = _pick_one("Which column holds the transaction date?", list(main_df.columns))
@@ -246,12 +285,23 @@ def audit_check() -> Dict[str, pd.DataFrame]:
     else:
         print(match_cols_main)
 
+    strip_cfg: dict[str, dict] = {}
+
+    for col in match_cols_main:
+        if re.search(r"name|description", col, flags=re.I) \
+        and pd.api.types.is_string_dtype(main_df[col]):
+            cfg = _ask_strip_config(col)
+            if cfg:
+                strip_cfg[col] = cfg
+                main_df[col] = _apply_strip(main_df[col], cfg)
     print(main_df[match_cols_main].head())
+    print(strip_cfg)
 
     same_columns_for_all = questionary.confirm(
         "Will ALL month files use the SAME column names for matching?", default=True
     ).ask()
     match_cols_src=None
+    strip_cfg_src: dict[str, dict] = {}
 
     # 5 ─── containers for audit results ────────────────────────────────────────
     verified_flag = []
@@ -275,7 +325,7 @@ def audit_check() -> Dict[str, pd.DataFrame]:
 
         source_df = _load_csv_safely(source_path)
         source_df = split_debit_credit(source_df)
-        # print(source_df.head())
+
         # choose columns in source (either same as main or ask)
         if match_cols_src and same_columns_for_all:
             print(match_cols_src)
@@ -288,24 +338,27 @@ def audit_check() -> Dict[str, pd.DataFrame]:
                 continue
             else: 
                 print(match_cols_src)
-        # if same_columns_for_all and all(c in source_df.columns for c in match_cols_main):
-        #     match_cols_src = match_cols_main
-        # else:
-        #     # if missing or user opted per-file detail
-        #     match_cols_src = select_columns_in_order(list(source_df.columns), f"Select matching column(s) for source file '{source_path.name}':")
-        #     if not match_cols_src:
-        #         console.print("[bold red]No columns chosen – skipping this source file.[/bold red]")
-        #         verified_flag.extend([False] * len(month_chunk))
-        #         unmatched_rows.append(month_chunk)
-        #         continue
-        #     else: 
-        #         print(match_cols_src)
 
-        # for col in [i for i in match_cols_src if "ate" in i]: #ate comes from Date hehehe
-        #     parsed = pd.to_datetime(source_df[col], errors="coerce")
-        #     if parsed.notna().any():
-        #         source_df[col] = parsed.dt.strftime("%Y-%m-%d")
-        # print(source_df[match_cols_src].head())
+        if same_columns_for_all and strip_cfg_src:
+            print(strip_cfg_src)
+            for i,j in strip_cfg_src.items():
+                source_df[i] = _apply_strip(source_df[i], j)
+        else:
+            if not same_columns_for_all:
+                strip_cfg_src: dict[str, dict] = {}
+            for col in match_cols_src:
+                print(f"Checking column '{col}' for stripping...")
+                if re.search(r"name|description", col, flags=re.I):
+                    print(f"Column '{col}' looks like a name or description.")
+                    cfg = None
+                    if not strip_cfg_src.get(col):
+                        cfg = _ask_strip_config(col)
+                    if cfg:
+                        strip_cfg_src[col] = cfg
+                        print(f"strip_cfg_src: {strip_cfg_src}")
+                        source_df[col] = _apply_strip(source_df[col], strip_cfg_src.get(col))
+        
+        print(source_df[match_cols_src].head())
 
         # 1️⃣ build keys WITHOUT forcing to string
         left_keys  = month_chunk[match_cols_main].copy()
@@ -313,21 +366,26 @@ def audit_check() -> Dict[str, pd.DataFrame]:
 
         MISSING = "__MISSING__"
         for c in left_keys.columns:
-            left_keys[c] = _norm_col(left_keys[c]).replace({"": MISSING})
+            if not strip_cfg.get(c):
+                print(f"Normalising column '{c}' in left keys...")
+                left_keys[c] = _norm_col(left_keys[c]).replace({"": MISSING})
 
         for c in right_keys.columns:
-            right_keys[c] = _norm_col(right_keys[c]).replace({"": MISSING})
+            if not strip_cfg_src.get(c):
+                print(f"Normalising column '{c}' in right keys...")
+                right_keys[c] = _norm_col(right_keys[c]).replace({"": MISSING})
 
         # 2️⃣ Make tuple keys
         left_tuples  = left_keys.apply(tuple, axis=1)
         right_tuples = right_keys.apply(tuple, axis=1)
 
-        print(left_tuples.iloc[24])
+        print(left_tuples.head())
         print(right_tuples.head())
 
         # 3️⃣ Existence check
         month_verified = left_tuples.isin(right_tuples)
         verified_flag.extend(month_verified.tolist())
+        right_keys.to_csv(audit_dir / f"check/right_keys{month_sig}.csv", index=False)  # save for debugging
 
         matched_cnt   = int(month_verified.sum())
         unmatched_cnt = int((~month_verified).sum())
