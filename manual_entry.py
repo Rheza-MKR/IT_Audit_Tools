@@ -32,37 +32,26 @@ def select_csv_from_folder(directory):
     file_choice = questionary.select("Select a CSV file to analyze:", choices=files + ["Back"]).ask()
     return None if file_choice == "Back" else os.path.join(directory, file_choice)
 
-def extract_by_accounts(df):
-    col = questionary.select("Select the column to assess:", choices=list(df.columns)).ask()
-    account_input = questionary.text("Enter account values (comma-separated):").ask()
-    accounts = [a.strip() for a in account_input.split(",") if a.strip()]
-
-    filtered_df = df[df[col].astype(str).isin(accounts)]
-    console.print(f"[bold green]Extracted {len(filtered_df)} rows where '{col}' matches given accounts.[/bold green]")
-    return filtered_df
-
-def recognize_pattern(df, dir_path):
-    do_pattern = questionary.confirm("Do you want to recognize a pattern in a specific column?", default=True).ask()
-    if not do_pattern:
+def recognize_alpha_in_transaction_id(df, dir_path):
+    do_check = questionary.confirm("Do you want to identify transactions with alphabetic characters in their transaction ID?", default=True).ask()
+    if not do_check:
         return
 
-    target_col = questionary.select("Select the column to apply pattern recognition:", choices=list(df.columns)).ask()
-    console.print("\n[bold blue]Pattern Explanation:[/bold blue]")
-    console.print("^xx  = starts with 'xx'\nxx^  = ends with 'xx'\nxx   = contains 'xx' anywhere\n")
+    transaction_col = questionary.select("Select the transaction ID column:", choices=list(df.columns)).ask()
 
-    pattern_input = questionary.text("Enter the pattern to search:").ask().strip()
+    df["manual entry"] = df[transaction_col].astype(str).str.contains(r"[A-Za-z]", regex=True, na=False)
 
-    if pattern_input.startswith("^"):
-        patt = f"^{re.escape(pattern_input[1:])}"
-    elif pattern_input.endswith("^"):
-        patt = f"{re.escape(pattern_input[:-1])}$"
+    if "Transaction ID" in df.columns:
+        matched_ids = df[df["manual entry"]]["Transaction ID"].unique()
+        result_df = df[df["Transaction ID"].isin(matched_ids)]
     else:
-        patt = f"{re.escape(pattern_input)}"
+        result_df = df[df["manual entry"]]
 
-    matched_df = df[df[target_col].astype(str).str.contains(patt, regex=True, na=False)]
+    if result_df.empty:
+        console.print("[bold green]No transactions with alphabetic characters found.[/bold green]")
+        return
 
-    console.print(f"[bold green]Found {len(matched_df)} rows matching pattern in '{target_col}'.[/bold green]")
-
+    console.print(f"[bold yellow]Found {len(result_df)} rows in transaction groups with alphabetic characters.[/bold yellow]")
     export = questionary.confirm("Do you want to export the result?", default=True).ask()
     if export:
         fmt = questionary.select("Select export format:", choices=["CSV", "XLSX"]).ask()
@@ -70,12 +59,13 @@ def recognize_pattern(df, dir_path):
         out_path = Path(f"{dir_path}/{fname}.{ 'csv' if fmt == 'CSV' else 'xlsx'}")
         try:
             if fmt == "CSV":
-                matched_df.to_csv(out_path, index=False)
+                result_df.to_csv(out_path, index=False)
             else:
-                matched_df.to_excel(out_path, index=False)
+                result_df.to_excel(out_path, index=False)
             console.print(f"[bold green]Exported to {out_path}[/bold green]")
         except Exception as e:
             console.print(f"[bold red]Failed to export: {e}[/bold red]")
+
 
 def main():
     console.print("[bold cyan]Manual Entry Checker App[/bold cyan]")
@@ -89,8 +79,7 @@ def main():
     if df is None:
         return
 
-    filtered_df = extract_by_accounts(df)
-    recognize_pattern(filtered_df, dir_path)
+    recognize_alpha_in_transaction_id(df, dir_path)
 
 if __name__ == "__main__":
     main()
