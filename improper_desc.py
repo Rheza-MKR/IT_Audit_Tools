@@ -33,7 +33,11 @@ def select_csv_from_folder(directory: Path) -> Path:
 
 def check_improper_descriptions(df: pd.DataFrame, directory: Path):
     while True:
-        col = questionary.select("Select the column to check for short entries:", choices=list(df.columns)).ask()
+        # Select group column
+        txn_col = questionary.select("Select the Transaction ID column to group by:", choices=list(df.columns)).ask()
+
+        # Select description column to check
+        desc_col = questionary.select("Select the column to check for short entries:", choices=list(df.columns)).ask()
         min_len = questionary.text("Minimum acceptable character length (e.g. 5):").ask()
 
         try:
@@ -42,17 +46,23 @@ def check_improper_descriptions(df: pd.DataFrame, directory: Path):
             console.print("[bold red]Invalid number – aborting check.[/bold red]")
             return
 
-        base_condition = df[col].astype(str).str.len() < min_len
-        result_df = df[base_condition]
+        # Identify group IDs where any row fails the length check
+        short_desc_groups = (
+            df[df[desc_col].astype(str).str.len() < min_len][txn_col]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        result_df = df[df[txn_col].isin(short_desc_groups)]
 
         if result_df.empty:
             console.print("[bold green]No improper entries based on description length.[/bold green]")
-            # 🔁 Ask to check another column
             if not questionary.confirm("Do you want to check another column?", default=False).ask():
                 break
             continue
 
-        console.print(f"[bold yellow]Found {len(result_df)} improper entries in '{col}'[/bold yellow]")
+        console.print(f"[bold yellow]Found {len(result_df)} entries across {len(short_desc_groups)} transactions[/bold yellow]")
 
         # ✅ Ask BEFORE additional filter logic
         filter_more = questionary.confirm("Do you want to filter further by another column?", default=False).ask()
@@ -66,7 +76,7 @@ def check_improper_descriptions(df: pd.DataFrame, directory: Path):
             while True:
                 filter_col = questionary.select(
                     "Select a column to filter by:",
-                    choices=[c for c in df.columns if c != col] + ["<Done>"]
+                    choices=[c for c in df.columns if c not in (desc_col, txn_col)] + ["<Done>"]
                 ).ask()
 
                 if filter_col == "<Done>":
@@ -82,9 +92,9 @@ def check_improper_descriptions(df: pd.DataFrame, directory: Path):
                     if logic_type.startswith("AND"):
                         result_df = result_df[filter_condition.loc[result_df.index]]
                     else:
-                        result_df = pd.concat([result_df, df[filter_condition & base_condition]]).drop_duplicates()
+                        result_df = pd.concat([result_df, df[filter_condition & df[txn_col].isin(short_desc_groups)]]).drop_duplicates()
 
-        # ✅ Export without repeating check prompt
+        # ✅ Export
         export = questionary.confirm("Do you want to export the results?", default=True).ask()
         if export:
             file_format = questionary.select("Choose export format:", choices=["CSV", "XLSX"]).ask()
@@ -99,7 +109,7 @@ def check_improper_descriptions(df: pd.DataFrame, directory: Path):
             except Exception as e:
                 console.print(f"[bold red]Export failed: {e}[/bold red]")
 
-        # ✅ After export, stop
+        # ✅ After export or skip, exit loop
         break
 
 
