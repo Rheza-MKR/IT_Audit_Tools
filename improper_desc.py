@@ -31,7 +31,7 @@ def select_csv_from_folder(directory: Path) -> Path:
     selected = questionary.select("Select a CSV file to check:", choices=csv_files + ["Back"]).ask()
     return None if selected == "Back" else directory / selected
 
-def check_improper_descriptions(df: pd.DataFrame, directory: Path):
+def check_improper_descriptions(df: pd.DataFrame) -> pd.DataFrame:
     txn_col = questionary.select("Select the Transaction ID column to group by:", choices=list(df.columns)).ask()
     desc_col = questionary.select("Select the column to check for short entries:", choices=list(df.columns)).ask()
     min_len = questionary.text("Minimum acceptable character length (e.g. 5):").ask()
@@ -40,7 +40,7 @@ def check_improper_descriptions(df: pd.DataFrame, directory: Path):
         min_len = int(min_len)
     except ValueError:
         console.print("[bold red]Invalid number – aborting check.[/bold red]")
-        return
+        return None
 
     # Create flag column
     df["improper desc"] = df[desc_col].astype(str).str.len() < min_len
@@ -51,34 +51,44 @@ def check_improper_descriptions(df: pd.DataFrame, directory: Path):
 
     if result_df.empty:
         console.print("[bold green]No improper entries based on description length.[/bold green]")
-        return
+        return None
 
     console.print(f"[bold yellow]Found {len(result_df)} entries across {len(flagged_txns)} transactions[/bold yellow]")
     console.print(f"[bold blue]Flagged rows: {df['improper desc'].sum()}[/bold blue]")
 
+    return result_df
+
+def export_dataframe(df: pd.DataFrame, directory: Path):
     export = questionary.confirm("Do you want to export the results?", default=True).ask()
-    if export:
-        file_format = questionary.select("Choose export format:", choices=["CSV", "XLSX"]).ask()
-        file_name = questionary.text("Enter export file name (without extension):").ask()
-        out_path = directory / f"{file_name}.{ 'csv' if file_format == 'CSV' else 'xlsx'}"
-        try:
-            if file_format == "CSV":
-                result_df.to_csv(out_path, index=False)
-            else:
-                result_df.to_excel(out_path, index=False)
-            console.print(f"[bold green]Exported {len(result_df)} entries to {out_path}[/bold green]")
-        except Exception as e:
-            console.print(f"[bold red]Export failed: {e}[/bold red]")
+    if not export:
+        return
+
+    file_format = questionary.select("Choose export format:", choices=["CSV", "XLSX"]).ask()
+    file_name = questionary.text("Enter export file name (without extension):").ask()
+    out_path = directory / f"{file_name}.{ 'csv' if file_format == 'CSV' else 'xlsx'}"
+    try:
+        if file_format == "CSV":
+            df.to_csv(out_path, index=False)
+        else:
+            df.to_excel(out_path, index=False)
+        console.print(f"[bold green]Exported {len(df)} entries to {out_path}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Export failed: {e}[/bold red]")
 
 
 def main():
     console.print("[bold cyan]Improper Description Entries Checker[/bold cyan]")
     dir_path = _ask_directory()
     file_path = select_csv_from_folder(dir_path)
-    if file_path:
-        df = read_csv_safely(file_path)
-        if df is not None:
-            check_improper_descriptions(df, dir_path)
+    if not file_path:
+        return
+    df = read_csv_safely(file_path)
+    if df is None:
+        return
+    result_df = check_improper_descriptions(df)
+    if result_df is not None:
+        export_dataframe(result_df, dir_path)
+
 
 if __name__ == "__main__":
     main()

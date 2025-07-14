@@ -33,7 +33,8 @@ def select_csv_from_folder(directory):
     return None if file_choice == "Back" else os.path.join(directory, file_choice)
 
 def export_dataframe(df, dir_path):
-    if df is None:
+    if df is None or df.empty:
+        console.print("[bold yellow]No data to export.[/bold yellow]")
         return
 
     export = questionary.confirm("Do you want to export the flagged data?", default=True).ask()
@@ -53,26 +54,39 @@ def export_dataframe(df, dir_path):
     except Exception as e:
         console.print(f"[bold red]Failed to export: {e}[/bold red]")
 
-def recognize_alpha_in_transaction_id(df):
-    do_check = questionary.confirm("Do you want to identify transactions with alphabetic characters in their transaction ID?", default=True).ask()
+def check_wrong_journal_entry(df):
+    do_check = questionary.confirm("Do you want to identify transactions with mixed BS and PnL accounts?", default=True).ask()
     if not do_check:
         return None
 
     transaction_col = questionary.select("Select the transaction ID column:", choices=list(df.columns)).ask()
+    account_col = questionary.select("Select the account ID column:", choices=list(df.columns)).ask()
 
-    df["manual entry"] = df[transaction_col].astype(str).str.contains(r"[A-Za-z]", regex=True, na=False)
+    wrong_entries = []
 
-    if df["manual entry"].any():
-        console.print(f"[bold yellow]Flagged {df['manual entry'].sum()} rows with alphabetic transaction IDs.[/bold yellow]")
-        return df
+    for tx_id, group in df.groupby(transaction_col):
+        account_series = group[account_col].astype(str)
+        bs = account_series.str.startswith(("1", "2", "3")).any()
+        pnl = account_series.str.startswith(("4", "5", "6", "7")).any()
+
+        # Exclude 6.5.1.3 entries from PnL detection
+        has_exception = account_series.str.contains(r"^6\.5\.1\.3$").any()
+        exception_filtered = account_series[~account_series.str.contains(r"^6\.5\.1\.3$")]
+        filtered_pnl = exception_filtered.str.startswith(("4", "5", "6", "7")).any()
+
+        if bs and filtered_pnl:
+            wrong_entries.append(group)
+
+    if wrong_entries:
+        result_df = pd.concat(wrong_entries)
+        console.print(f"[bold yellow]Found {len(result_df)} rows with invalid BS and PnL combination.[/bold yellow]")
+        return result_df
     else:
-        console.print("[bold green]No transactions with alphabetic characters found.[/bold green]")
+        console.print("[bold green]No invalid combinations found.[/bold green]")
         return None
 
-
-
 def main():
-    console.print("[bold cyan]Manual Entry Checker App[/bold cyan]")
+    console.print("[bold cyan]Wrong Journal Entry Checker App[/bold cyan]")
     dir_path = _ask_directory()
     file_path = select_csv_from_folder(dir_path)
     if not file_path:
@@ -80,8 +94,8 @@ def main():
     df = read_csv_safely(file_path)
     if df is None:
         return
-    updated_df = recognize_alpha_in_transaction_id(df)
-    export_dataframe(updated_df, dir_path)
+    flagged_df = check_wrong_journal_entry(df)
+    export_dataframe(flagged_df, dir_path)
 
 if __name__ == "__main__":
     main()
