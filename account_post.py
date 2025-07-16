@@ -55,26 +55,35 @@ def export_dataframe(df, dir_path):
         console.print(f"[bold red]Failed to export: {e}[/bold red]")
 
 def check_wrong_journal_entry(df):
-    do_check = questionary.confirm("Do you want to identify transactions with mixed BS and PnL accounts?", default=True).ask()
-    if not do_check:
-        return None
-
     transaction_col = questionary.select("Select the transaction ID column:", choices=list(df.columns)).ask()
-    account_col = questionary.select("Select the account ID column:", choices=list(df.columns)).ask()
+    account_num_col = questionary.select("Select the account number column:", choices=list(df.columns)).ask()
+    account_name_col = questionary.select("Select the account name column:", choices=list(df.columns)).ask()
+
+    # Get user-specified account numbers to exclude
+    account_excl_input = questionary.text("Enter specific account numbers to exclude (comma-separated):").ask()
+    excluded_numbers = [acc.strip() for acc in account_excl_input.split(",") if acc.strip()]
+
+    # Keywords to exclude based on account names
+    keyword_input = questionary.text("Enter keywords to ignore in account names (comma-separated):").ask()
+    ignore_keywords = [k.strip().lower() for k in keyword_input.split(",") if k.strip()]
 
     wrong_entries = []
 
     for tx_id, group in df.groupby(transaction_col):
-        account_series = group[account_col].astype(str)
-        bs = account_series.str.startswith(("1", "2", "3")).any()
-        pnl = account_series.str.startswith(("4", "5", "6", "7")).any()
+        # Exclude group if any account name contains a keyword
+        if group[account_name_col].astype(str).str.lower().str.contains('|'.join(re.escape(k) for k in ignore_keywords)).any():
+            continue
 
-        # Exclude 6.5.1.3 entries from PnL detection
-        has_exception = account_series.str.contains(r"^6\.5\.1\.3$").any()
-        exception_filtered = account_series[~account_series.str.contains(r"^6\.5\.1\.3$")]
-        filtered_pnl = exception_filtered.str.startswith(("4", "5", "6", "7")).any()
+        # Exclude group if any account number is in the excluded list
+        if group[account_num_col].astype(str).isin(excluded_numbers).any():
+            continue
 
-        if bs and filtered_pnl:
+        # BS/PnL detection
+        account_nums = group[account_num_col].astype(str)
+        has_bs = account_nums.str.startswith(("1", "2", "3")).any()
+        has_pnl = account_nums.str.startswith(("4", "5", "6", "7")).any()
+
+        if has_bs and has_pnl:
             wrong_entries.append(group)
 
     if wrong_entries:
@@ -84,6 +93,7 @@ def check_wrong_journal_entry(df):
     else:
         console.print("[bold green]No invalid combinations found.[/bold green]")
         return None
+
 
 def main():
     console.print("[bold cyan]Wrong Journal Entry Checker App[/bold cyan]")

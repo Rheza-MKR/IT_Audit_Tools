@@ -5,6 +5,7 @@ import questionary
 from rich.console import Console
 import manual_entry
 import improper_desc
+import account_post
 
 console = Console()
 
@@ -28,7 +29,8 @@ def read_csv_safely(path: Path) -> pd.DataFrame:
 def check_directory(directory: Path):
     dir_manual_entry = directory / "manual_entry"
     dir_desc = directory / "description_check"
-    for subdir in [dir_manual_entry, dir_desc]:
+    dir_acc = directory / "account_post"
+    for subdir in [dir_manual_entry, dir_desc, dir_acc]:
         if not subdir.exists():
             subdir.mkdir(parents=True, exist_ok=True)
             print(f"[+] Created directory: {subdir}")
@@ -60,19 +62,26 @@ def process_csv(directory: Path) -> Path:
             continue
 
         # Manual entry
-        df_manual_entry = manual_entry.recognize_alpha_in_transaction_id(df.copy())
-        if df_manual_entry is not None:
-            export_dataframe(df_manual_entry, directory / "manual_entry", file_name[:-4] + "_manual_entry")
-        else:
-            console.print(f"[bold yellow]No manual entry issues found in {file_name}.[/bold yellow]")
+        # df_manual_entry = manual_entry.recognize_alpha_in_transaction_id(df.copy())
+        # if df_manual_entry is not None:
+        #     export_dataframe(df_manual_entry, directory / "manual_entry", file_name[:-4] + "_manual_entry")
+        # else:
+        #     console.print(f"[bold yellow]No manual entry issues found in {file_name}.[/bold yellow]")
 
         # Improper description
-        df_improper_desc = improper_desc.check_improper_descriptions(df.copy())
-        if df_improper_desc is not None:
-            export_dataframe(df_improper_desc, directory / "description_check", file_name[:-4] + "_improper_desc")
-        else:
-            console.print(f"[bold yellow]No improper description issues found in {file_name}.[/bold yellow]")
+        # df_improper_desc = improper_desc.check_improper_descriptions(df.copy())
+        # if df_improper_desc is not None:
+        #     export_dataframe(df_improper_desc, directory / "description_check", file_name[:-4] + "_improper_desc")
+        # else:
+        #     console.print(f"[bold yellow]No improper description issues found in {file_name}.[/bold yellow]")
 
+        # Account posting
+        df_account_post = account_post.check_wrong_journal_entry(df.copy())
+        if df_account_post is not None:
+            export_dataframe(df_account_post, directory / "account_post", file_name[:-4] + "_account_post")
+        else:
+            console.print(f"[bold yellow]No account posting issues found in {file_name}.[/bold yellow]")
+            
         file_processed += 1
     return file_processed > 0
 
