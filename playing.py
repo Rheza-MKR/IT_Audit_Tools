@@ -6,6 +6,7 @@ from rich.console import Console
 import manual_entry
 import improper_desc
 import account_post
+import log_duplication
 
 console = Console()
 
@@ -78,15 +79,21 @@ def process_csv(directory: Path) -> Path:
         #     console.print(f"[bold yellow]No improper description issues found in {file_name}.[/bold yellow]")
 
         # Account posting
-        df_account_post = account_post.check_wrong_journal_entry(df.copy())
-        if df_account_post is not None:
-            export_dataframe(df_account_post, directory / "account_post", file_name[:-4] + "_account_post")
-        else:
-            console.print(f"[bold yellow]No account posting issues found in {file_name}.[/bold yellow]")
+        # df_account_post = account_post.check_wrong_journal_entry(df.copy())
+        # if df_account_post is not None:
+        #     export_dataframe(df_account_post, directory / "account_post", file_name[:-4] + "_account_post")
+        # else:
+        #     console.print(f"[bold yellow]No account posting issues found in {file_name}.[/bold yellow]")
 
-        df_duplicate = account_post.check_wrong_journal_entry(df.copy())
-        if df_duplicate is not None:
-            export_dataframe(df_duplicate, directory / "duplicate_month", file_name[:-4] + "_duplicate_month")
+        df_duplicate_month = log_duplication.detect_duplicates_groupby(df.copy())
+        if df_duplicate_month is not None:
+            export_dataframe(df_duplicate_month, directory / "monthly_duplicate", file_name[:-4] + "_duplicate_month")
+        else:
+            console.print(f"[bold yellow]No duplication found in {file_name}.[/bold yellow]")
+        
+        df_duplicate_daily = log_duplication.detect_duplicates_groupby(df.copy())
+        if df_duplicate_daily is not None:
+            export_dataframe(df_duplicate_daily, directory / "daily_duplicate", file_name[:-4] + "_duplicate_day")
         else:
             console.print(f"[bold yellow]No duplication found in {file_name}.[/bold yellow]")
 

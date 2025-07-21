@@ -54,55 +54,89 @@ def export_dataframe(df, dir_path):
     except Exception as e:
         console.print(f"[bold red]Failed to export: {e}[/bold red]")
 
-def detect_duplicates_within_period(df):
-    date_col = questionary.select("Select the date/timestamp column:", choices=list(df.columns)).ask()
+def detect_duplicates_groupby(df):
+    date_col = questionary.select("Select the datetime/timestamp column:", choices=list(df.columns)).ask()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 
-    unit_choices = ["minutes", "hours", "days"]
-    unit = questionary.select("Select the time unit for checking duplicates:", choices=unit_choices).ask()
-    value = questionary.text(f"Enter the time threshold in {unit} (e.g., 10):").ask()
+    considered_cols = questionary.checkbox("Select columns to consider for duplication:", choices=[c for c in df.columns if c != date_col]).ask()
 
-    try:
-        value = int(value)
-    except ValueError:
-        console.print("[bold red]Invalid number – aborting.[/bold red]")
-        return None
-
-    considered_columns = questionary.checkbox("Select the columns to consider for duplicate detection:", choices=list(df.columns)).ask()
-
-    df_sorted = df.sort_values(by=date_col).copy()
-    df_sorted["duplicate_flag"] = False
-
-    for i in range(1, len(df_sorted)):
-        current = df_sorted.iloc[i]
-        prev = df_sorted.iloc[i - 1]
-
-        time_diff = (current[date_col] - prev[date_col])
-        threshold = pd.to_timedelta(value, unit=unit)
-
-        if time_diff <= threshold and all(current[col] == prev[col] for col in considered_columns):
-            df_sorted.loc[df_sorted.index[i], "duplicate_flag"] = True
-            df_sorted.loc[df_sorted.index[i - 1], "duplicate_flag"] = True
-
-    duplicates_df = df_sorted[df_sorted["duplicate_flag"]]
-    if not duplicates_df.empty:
-        console.print(f"[bold yellow]Detected {len(duplicates_df)} rows with duplicates within {value} {unit}.[/bold yellow]")
-        return duplicates_df.drop(columns=["duplicate_flag"])
+    time_unit = questionary.select("Select time unit:", choices=["minute", "hour", "day", "month", "year"]).ask()
+    # Build the period columns based on the selected unit
+    if time_unit == "day":
+        group_keys = [df[date_col].dt.year, df[date_col].dt.month, df[date_col].dt.day]
+    elif time_unit == "month":
+        group_keys = [df[date_col].dt.year, df[date_col].dt.month]
+    elif time_unit == "year":
+        group_keys = [df[date_col].dt.year]
+    elif time_unit == "hour":
+        group_keys = [df[date_col].dt.year, df[date_col].dt.month, df[date_col].dt.day, df[date_col].dt.hour]
+    elif time_unit == "minute":
+        group_keys = [df[date_col].dt.year, df[date_col].dt.month, df[date_col].dt.day, df[date_col].dt.hour, df[date_col].dt.minute]
     else:
-        console.print("[bold green]No duplicates detected within the specified period.[/bold green]")
-        return None
+        raise ValueError("Unsupported time unit.")
+
+    group_df = df.copy()
+    group_df["_grp1"] = group_keys[0]
+    for i, key in enumerate(group_keys[1:], 2):
+        group_df[f"_grp{i}"] = key
+
+    grp_cols = [f"_grp{i+1}" for i in range(len(group_keys))]
+    result_idxs = []
+    for _, group in group_df.groupby(grp_cols):
+        group = group.sort_values(by=date_col)
+        dups = group.duplicated(subset=considered_cols, keep=False)
+        if dups.any():
+            result_idxs.extend(group[dups].index.tolist())
+    return df.loc[result_idxs].copy()
+
+def detect_duplicates_within_period(df):
+    date_col = questionary.select("Select the datetime/timestamp column:", choices=list(df.columns)).ask()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    considered_cols = questionary.checkbox("Select columns to consider for duplication:", choices=[c for c in df.columns if c != date_col]).ask()
+
+    unit = questionary.select("Select interval unit:", choices=["seconds", "minutes", "hours", "days"]).ask()
+    interval_val = int(questionary.text(f"Enter the number of {unit} for the interval (e.g. 2):").ask())
+    df = df.sort_values(by=date_col).reset_index(drop=True)
+    interval = pd.to_timedelta(f"{interval_val} {unit}")
+    idxs = set()
+    for i, row in df.iterrows():
+        lower = row[date_col]
+        upper = lower + interval
+        mask = (df[date_col] > lower) & (df[date_col] <= upper)
+        sub = df.loc[mask, :]
+        for j, cmp_row in sub.iterrows():
+            if all(row[col] == cmp_row[col] for col in considered_cols):
+                idxs.add(i)
+                idxs.add(j)
+    return df.loc[sorted(idxs)].copy()
 
 def main():
-    console.print("[bold cyan]Duplicate Within Time Period Checker[/bold cyan]")
+    console.print("[bold cyan]Time-based Duplicate Checker App[/bold cyan]")
     dir_path = _ask_directory()
     file_path = select_csv_from_folder(dir_path)
     if not file_path:
         return
+
     df = read_csv_safely(file_path)
     if df is None:
         return
-    dup_df = detect_duplicates_within_period(df)
-    export_dataframe(dup_df, dir_path)
+
+    mode = questionary.select("Select checking mode:", choices=[
+        "Group by time period",
+        "Duplicate within time interval"
+    ]).ask()
+
+    if mode == "Group by time period":
+        flagged_df = detect_duplicates_groupby(df)
+    else:
+        flagged_df = detect_duplicates_within_period(df)
+
+    if not flagged_df.empty:
+        console.print(f"[bold yellow]Found {len(flagged_df)} potential duplicates based on your selection.[/bold yellow]")
+    else:
+        console.print("[bold green]No duplicates found based on the selected criteria.[/bold green]")
+
+    export_dataframe(flagged_df, dir_path)
 
 if __name__ == "__main__":
     main()
