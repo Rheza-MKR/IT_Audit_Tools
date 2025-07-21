@@ -30,7 +30,9 @@ def check_directory(directory: Path):
     dir_manual_entry = directory / "manual_entry"
     dir_desc = directory / "description_check"
     dir_acc = directory / "account_post"
-    for subdir in [dir_manual_entry, dir_desc, dir_acc]:
+    dir_month = directory / "monthly_duplicate"
+    dir_day = directory / "daily_duplicate"
+    for subdir in [dir_manual_entry, dir_desc, dir_acc, dir_month, dir_day]:
         if not subdir.exists():
             subdir.mkdir(parents=True, exist_ok=True)
             print(f"[+] Created directory: {subdir}")
@@ -81,7 +83,13 @@ def process_csv(directory: Path) -> Path:
             export_dataframe(df_account_post, directory / "account_post", file_name[:-4] + "_account_post")
         else:
             console.print(f"[bold yellow]No account posting issues found in {file_name}.[/bold yellow]")
-            
+
+        df_duplicate = account_post.check_wrong_journal_entry(df.copy())
+        if df_duplicate is not None:
+            export_dataframe(df_duplicate, directory / "duplicate_month", file_name[:-4] + "_duplicate_month")
+        else:
+            console.print(f"[bold yellow]No duplication found in {file_name}.[/bold yellow]")
+
         file_processed += 1
     return file_processed > 0
 
