@@ -1,38 +1,36 @@
 import inquirer
 import os
 from pyfiglet import figlet_format
-import search  # Import search.py
-import recon   # Import recon.py
+import search
+import recon
 import summarizer
+import anomalies
 
 def display_banner():
-    """Display ASCII art title and watermark"""
-    title = figlet_format("IT Audit Tools")  # Generate ASCII title
+    title = figlet_format("IT Audit Tools")
     print(title)
 
 def main_menu():
-    """Display the main menu using inquirer"""
     questions = [
         inquirer.List(
             "choice",
             message="Select an option:",
-            choices=["Search Data", "Reconcile Data", "Summarize Data","Exit"],
+            choices=["Anomaly Detection", "Search Data", "Reconcile Data", "Summarize Data", "Exit"],
         )
     ]
-    
     answer = inquirer.prompt(questions)
     return answer["choice"]
 
 def main():
-    """Main function to handle user selection"""
     display_banner()
     while True:
         choice = main_menu()
-        
-        if choice == "Search Data":
-            search.main()  # Correctly calls search.py's main function
+        if choice == "Anomaly Detection":
+            anomalies.main()
+        elif choice == "Search Data":
+            search.main()
         elif choice == "Reconcile Data":
-            recon.main()  # Correctly calls recon.py's main function
+            recon.main()
         elif choice == "Summarize Data":
             summarizer.main()
         elif choice == "Exit":

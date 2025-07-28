@@ -8,7 +8,7 @@ console = Console()
 
 def _ask_directory() -> Path:
     while True:
-        dir_path = Path(questionary.text("Enter the audit directory path:").ask()).expanduser()
+        dir_path = Path(questionary.text("Enter the audit directory path:").ask()).expanduser().resolve()
         if dir_path.is_dir():
             return dir_path
         console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")

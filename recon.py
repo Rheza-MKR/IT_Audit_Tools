@@ -1,23 +1,33 @@
 import pandas as pd
 import os
 import inquirer
+from pathlib import Path
+from rich.console import Console
+import questionary
 
-def select_csv_file(prompt):
-    """Prompt user to select a CSV file."""
-    files = [f for f in os.listdir('./data/') if f.endswith('.csv')]
-    while not files:
-        print("No CSV files found. Please add a CSV file and try again.")
-        input("Press Enter to retry...")
-        files = [f for f in os.listdir('./data/') if f.endswith('.csv')]
+console = Console()
 
-    questions = [inquirer.List('file', message=prompt, choices=files)]
-    answer = inquirer.prompt(questions)
-    return answer['file']
+def _ask_directory() -> Path:
+    while True:
+        dir_path = Path(questionary.text("Enter the audit directory path:").ask()).expanduser().resolve()
+        if dir_path.is_dir():
+            return dir_path
+        console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")
+
+def select_csv_from_folder(directory, prompt="Select a CSV file to analyze:"):
+    """List CSV files in the given directory and prompt user to select one."""
+    files = [f for f in os.listdir(directory) if f.endswith('.csv')]
+    if not files:
+        print("No CSV files found in the selected directory.")
+        return None
+    question = [inquirer.List('file', message=prompt, choices=files)]
+    answer = inquirer.prompt(question)
+    return Path(directory) / answer['file'] if answer else None
 
 def get_columns(csv_file):
     """Get column names from a CSV file."""
     try:
-        df = pd.read_csv('./data/'+ csv_file, encoding='utf-8', delimiter=',', on_bad_lines='skip', nrows=1)
+        df = pd.read_csv(csv_file, encoding='utf-8', delimiter=',', on_bad_lines='skip', nrows=1)
         return df.columns.tolist()
     except Exception as e:
         print(f"Error reading {csv_file}: {e}")
@@ -25,9 +35,9 @@ def get_columns(csv_file):
 
 def select_column(columns, prompt):
     """Prompt user to select a column."""
-    questions = [inquirer.List('column', message=prompt, choices=columns)]
-    answer = inquirer.prompt(questions)
-    return answer['column']
+    question = [inquirer.List('column', message=prompt, choices=columns)]
+    answer = inquirer.prompt(question)
+    return answer['column'] if answer else None
 
 def check_data_format(df, column):
     """Check for missing values, special characters, or negative values in a column."""
@@ -49,47 +59,36 @@ def check_data_format(df, column):
 
 def select_reconcile_method():
     """Prompt user to select a reconciliation method."""
-    questions = [
-        inquirer.List('reconcile_method', message="Select a reconciliation method:", choices=[
-            "Reconcile standard (default)",
-            "Reconcile from first N characters",
-            "Reconcile from last N characters"
-        ])
-    ]
-    answer = inquirer.prompt(questions)
+    question = [inquirer.List('reconcile_method', message="Select reconciliation method:", choices=[
+        "Standard (full match)", "First N characters", "Last N characters"
+    ])]
+    answer = inquirer.prompt(question)
+    method = answer['reconcile_method'] if answer else None
 
     num_chars = None
-    if answer['reconcile_method'] in ["Reconcile from first N characters", "Reconcile from last N characters"]:
-        num_chars_input = inquirer.text("Enter the number of characters to use for reconciliation")
-
-        # Check if the input is a valid integer
+    if method in ["First N characters", "Last N characters"]:
+        num_chars_input = inquirer.text("Enter number of characters:")
         try:
             num_chars = int(num_chars_input)
-        except ValueError:
-            print("Invalid input! Please enter a valid number.")
-            return None, None  # Exit early or handle appropriately
+        except:
+            print("Invalid number.")
+            return None, None
 
-    return answer['reconcile_method'], num_chars
+    return method, num_chars
 
 def select_export_format():
     """Prompt user to select an export file format (CSV or XLSX)."""
-    questions = [
-        inquirer.List('export_format', message="Select an export format:", choices=[
-            "CSV",
-            "XLSX"
-        ])
-    ]
-    answer = inquirer.prompt(questions)
-    return answer['export_format']
+    question = [inquirer.List('export_format', message="Select an export format:", choices=["CSV", "XLSX"])]
+    answer = inquirer.prompt(question)
+    return answer['export_format'] if answer else None
 
-def reconcile_files(file1, file2, key_column1, key_column2, reconcile_method, num_chars):
-    """Perform reconciliation between two CSV files."""
+def reconcile_files(file1_path, file2_path, key_column1, key_column2, method, num_chars):
     try:
-        df1 = pd.read_csv('./data/'+file1, encoding='utf-8', delimiter=',', on_bad_lines='skip')
-        df2 = pd.read_csv('./data/'+file2, encoding='utf-8', delimiter=',', on_bad_lines='skip')
+        df1 = pd.read_csv(file1_path, encoding='utf-8', on_bad_lines='skip')
+        df2 = pd.read_csv(file2_path, encoding='utf-8', on_bad_lines='skip')
     except Exception as e:
         print(f"Error reading files: {e}")
-        return
+        return None
 
     errors1 = check_data_format(df1, key_column1)
     errors2 = check_data_format(df2, key_column2)
@@ -97,65 +96,61 @@ def reconcile_files(file1, file2, key_column1, key_column2, reconcile_method, nu
     if errors1 or errors2:
         print("\nData Format Issues:")
         if errors1:
-            print(f"Issues in {file1} - {key_column1}: {', '.join(errors1)}")
+            print(f"Issues in {file1_path.name} - {key_column1}: {', '.join(errors1)}")
         if errors2:
-            print(f"Issues in {file2} - {key_column2}: {', '.join(errors2)}")
+            print(f"Issues in {file2_path.name} - {key_column2}: {', '.join(errors2)}")
 
-        if not inquirer.confirm("Do you want to continue despite data format issues?", default=False):
-            print("Reconciliation aborted.")
-            return
+        if not inquirer.confirm("Continue despite data issues?", default=False):
+            return None
 
     df1[key_column1] = df1[key_column1].astype(str).str.strip()
     df2[key_column2] = df2[key_column2].astype(str).str.strip()
 
-    if reconcile_method == "Reconcile from first N characters":
+    if method == "First N characters":
         df1[key_column1] = df1[key_column1].str[:num_chars]
         df2[key_column2] = df2[key_column2].str[:num_chars]
-    elif reconcile_method == "Reconcile from last N characters":
+    elif method == "Last N characters":
         df1[key_column1] = df1[key_column1].str[-num_chars:]
         df2[key_column2] = df2[key_column2].str[-num_chars:]
 
     matched = df1[df1[key_column1].isin(df2[key_column2])]
-    unmatched_1 = df1[~df1[key_column1].isin(df2[key_column2])]
+    unmatched = df1[~df1[key_column1].isin(df2[key_column2])]
 
-    print("\nReconciliation Summary:")
-    print(f"Total records in {file1}: {len(df1)}")
-    print(f"Total Matched: {len(matched)}")
-    print(f"Total Unmatched: {len(unmatched_1)}")
+    print(f"\nReconciliation Summary:")
+    print(f"Records in {file1_path.name}: {len(df1)}")
+    print(f"Matched: {len(matched)}")
+    print(f"Unmatched: {len(unmatched)}")
 
-    if inquirer.confirm("Do you want to export unmatched records?", default=True):
-        # Select the export format
-        export_format = select_export_format()
-        output_filename = f"unmatch-{os.path.basename(file1)}"
-
-        if export_format == "CSV":
-            unmatched_1.to_csv('./data/'+output_filename, index=False)
-            print(f"\nUnmatched records from {file1} saved as {output_filename}.")
-        elif export_format == "XLSX":
-            output_filename = output_filename.replace(".csv", ".xlsx")
-            unmatched_1.to_excel('./data/'+output_filename, index=False)
-            print(f"\nUnmatched records from {file1} saved as {output_filename}.")
-
-        # Ask if the user wants to go back to the main menu instead of undoing the operation
-        if inquirer.confirm("Do you want to go back to the Reconcile menu?", default=False):
-            main()  # Call the main function to go back to the main menu
+    if inquirer.confirm("Export unmatched records?", default=True):
+        fmt = select_export_format()
+        output_file = Path(file1_path.parent) / f"unmatched_{file1_path.stem}.{fmt.lower()}"
+        try:
+            if fmt == "CSV":
+                unmatched.to_csv(output_file, index=False)
+            else:
+                unmatched.to_excel(output_file, index=False)
+            print(f"Saved: {output_file}")
+        except Exception as e:
+            print(f"Error saving: {e}")
 
 def main():
-    """Main function for recon.py."""
-    print("CSV Reconciliation Tool")
+    data_dir = _ask_directory()
+    print("[Reconciliation App]")
 
-    file1 = select_csv_file("Select the main CSV file (file1):")
-    file2 = select_csv_file("Select the second CSV file (file2):")
-
-    key_column1 = select_column(get_columns(file1), "Select the column for reconciliation in file1:")
-    key_column2 = select_column(get_columns(file2), "Select the column for reconciliation in file2:")
-
-    reconcile_method, num_chars = select_reconcile_method()
-    if reconcile_method is None:
-        print("Reconciliation aborted due to invalid number input.")
+    file1_path = select_csv_from_folder(data_dir, "Select main file:")
+    if not file1_path:
+        return
+    file2_path = select_csv_from_folder(data_dir, "Select reference file:")
+    if not file2_path:
         return
 
-    reconcile_files(file1, file2, key_column1, key_column2, reconcile_method, num_chars)
+    col1 = select_column(get_columns(file1_path), f"Column to match in {file1_path.name}")
+    col2 = select_column(get_columns(file2_path), f"Column to match in {file2_path.name}")
+    method, num_chars = select_reconcile_method()
+    if method is None:
+        return
+
+    reconcile_files(file1_path, file2_path, col1, col2, method, num_chars)
 
 if __name__ == "__main__":
     main()

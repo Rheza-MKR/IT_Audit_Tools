@@ -1,17 +1,76 @@
-## Getting Started
+# 🛠️ IT Audit Tools
 
-### Prerequisites
+A terminal-based audit toolset built with Python for manual data checking, reconciliation, and summarization.
 
-- Python 3.7+
+This app includes:
+- 📊 **Anomaly Detection**
+  - Manual Entry Detection
+  - Improper Description Checker
+  - Wrong Account Posting
+  - Log Duplication Checker
+  - Group Description Sum Checker
+- 🔍 **Search Data**
+- 🔄 **Reconcile Data**
+- 📈 **Summarize Data** (on progress)
 
-### Installation
+---
 
-### Clone the repository and install the dependencies:
-git clone https://github.com/your-username/IT_Audit_Tools.git
-cd IT_Audit_Tools
-pip install -r requirements.txt
+## 📦 Prerequisites
 
-### Usage:
-python3 -m venv venv
-source venv/bin/activate
-Usage python3 main.py
+Before you start, make sure you have the following installed:
+
+| Tool | Description | Install |
+|------|-------------|---------|
+| 🐍 Python 3.9+ | Required for development (optional for Docker usage) | [python.org](https://www.python.org/) |
+| 🐳 Docker | To containerize and run the app | [Install Docker](https://docs.docker.com/get-docker/) |
+| 🐙 Git (optional) | To clone the repository | [git-scm.com](https://git-scm.com/) |
+
+---
+
+## 🚀 Getting Started
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/yourusername/it-audit-tools.git
+cd it-audit-tools
+```
+
+### 2. Start with docker 
+download docker locally and make a docker account 
+and then in the terminal (under the it-audit-tools)
+
+```bash
+# Build the image (first time or after updating requirements.txt)
+docker compose build
+
+# Run the app
+docker compose run --rm audit-tools
+```
+
+## Project Structure
+```bash
+├── main.py                         # Landing menu: Anomalies, Reconcile, Search, Summarize
+├── anomalies/
+│   ├── anomalies.py               # Submenu for anomaly detection
+│   ├── manual_entry.py
+│   ├── improper_desc.py
+│   ├── account_post.py
+│   ├── log_duplication.py
+│   └── groupping_desc.py
+├── recon.py
+├── search.py
+├── summarizer.py
+├── requirements.txt
+├── docker-compose.yml
+├── Dockerfile
+└── README.md
+```
+
+
+## Clean up cmds
+```bash
+docker compose down   # Stops containers
+docker system prune   # Frees unused Docker space (optional)
+```
+

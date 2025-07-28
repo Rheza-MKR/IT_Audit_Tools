@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  audit-tools:
+    build: .
+    stdin_open: true
+    tty: true
+    volumes:
+      - .:/app

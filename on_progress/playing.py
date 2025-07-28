@@ -3,9 +3,9 @@ from pathlib import Path
 import pandas as pd
 import questionary
 from rich.console import Console
-import manual_entry
+import anomalies_tools.manual_entry as manual_entry
 import improper_desc
-import account_post
+import anomalies_tools.account_post as account_post
 import log_duplication
 
 console = Console()
