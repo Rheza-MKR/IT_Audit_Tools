@@ -1,21 +1,21 @@
-# 🛠️ IT Audit Tools
+🛠️ IT Audit Tools
 
 A terminal-based audit toolset built with Python for manual data checking, reconciliation, and summarization.
 
 This app includes:
-- 📊 **Anomaly Detection**
+- 📊 Anomaly Detection
   - Manual Entry Detection
   - Improper Description Checker
   - Wrong Account Posting
   - Log Duplication Checker
   - Group Description Sum Checker
-- 🔍 **Search Data**
-- 🔄 **Reconcile Data**
-- 📈 **Summarize Data** (on progress)
+- 🔍 Search Data
+- 🔄 Reconcile Data
+- 📈 Summarize Data (on progress)
 
 ---
 
-## 📦 Prerequisites
+## Prerequisites
 
 Before you start, make sure you have the following installed:
 
@@ -32,7 +32,7 @@ Before you start, make sure you have the following installed:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/it-audit-tools.git
+git clone --branch stagging https://github.com/Rheza-MKR/IT_Audit_Tools.git
 cd it-audit-tools
 ```
 
