@@ -3,6 +3,7 @@ import os
 from pyfiglet import figlet_format
 import search
 import recon
+import interactive_filter
 import summarizer
 import anomalies
 
@@ -15,7 +16,7 @@ def main_menu():
         inquirer.List(
             "choice",
             message="Select an option:",
-            choices=["Anomaly Detection", "Search Data", "Reconcile Data", "Summarize Data", "Exit"],
+            choices=["Anomaly Detection", "Search Data", "Interactive Filter", "Reconcile Data", "Summarize Data", "Exit"],
         )
     ]
     answer = inquirer.prompt(questions)
@@ -29,6 +30,8 @@ def main():
             anomalies.main()
         elif choice == "Search Data":
             search.main()
+        elif choice == "Interactive Filter":
+            interactive_filter.main()
         elif choice == "Reconcile Data":
             recon.main()
         elif choice == "Summarize Data":
