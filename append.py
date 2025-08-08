@@ -107,4 +107,5 @@ def main():
     append_unique_rows(folder, files, unique_columns)
 
 
-main()
+if __name__ == "__main__":
+    main()
