@@ -6,6 +6,7 @@ import interactive_filter
 import summarizer
 import anomalies
 import append
+import clean_up
 
 def display_banner():
     title = figlet_format("IT Audit Tools")
@@ -16,7 +17,7 @@ def main_menu():
         inquirer.List(
             "choice",
             message="Select an option:",
-            choices=["Anomaly Detection", "Interactive Filter", "Reconcile Data", "Append Data","Summarize Data", "Exit"],
+            choices=["Anomaly Detection", "Interactive Filter", "Reconcile Data", "Append Data","Summarize Data", "Clean Up","Exit"],
         )
     ]
     answer = inquirer.prompt(questions)
@@ -36,6 +37,8 @@ def main():
             append.main()
         elif choice == "Summarize Data":
             summarizer.main()
+        elif choice == "Clean Up":
+            clean_up.main()
         elif choice == "Exit":
             print("Exiting...")
             break
