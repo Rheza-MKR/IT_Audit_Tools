@@ -7,16 +7,7 @@ import os
 
 console = Console()
 
-def read_csv_safely(path):
-    try:
-        df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
-        if len(df.columns) == 1:
-            df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
-        return df
-    except Exception as e:
-        console.print(f"[bold red]Error reading file: {e}[/bold red]")
-        return None
-
+# ── File helpers ──────────────────────────────────────────────────────────
 def _ask_directory() -> Path:
     while True:
         dir_path = Path(questionary.text("Enter the audit directory path:").ask()).expanduser().resolve()
@@ -24,13 +15,36 @@ def _ask_directory() -> Path:
             return dir_path
         console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")
 
-def select_csv_from_folder(directory):
-    files = [f for f in os.listdir(directory) if f.endswith(".csv")]
+def _list_data_files(directory: Path):
+    return sorted([f for f in os.listdir(directory) if f.lower().endswith((".csv", ".xls", ".xlsx"))])
+
+def select_data_file_from_folder(directory):
+    files = _list_data_files(directory)
     if not files:
-        console.print("[bold red]No CSV files found in the folder.[/bold red]")
+        console.print("[bold red]No CSV/XLS/XLSX files found in the folder.[/bold red]")
         return None
-    file_choice = questionary.select("Select a CSV file to analyze:", choices=files + ["Back"]).ask()
+    file_choice = questionary.select("Select a file to analyze:", choices=files + ["Back"]).ask()
     return None if file_choice == "Back" else os.path.join(directory, file_choice)
+
+def read_file_safely(path: str | Path) -> pd.DataFrame | None:
+    path = Path(path)
+    try:
+        ext = path.suffix.lower()
+        if ext in (".xls", ".xlsx"):
+            return pd.read_excel(path)
+        if ext == ".csv":
+            try:
+                df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+                if len(df.columns) == 1:
+                    df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
+                return df
+            except Exception:
+                return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
+        console.print(f"[bold red]Unsupported file type: {ext}[/bold red]")
+        return None
+    except Exception as e:
+        console.print(f"[bold red]Error reading file: {e}[/bold red]")
+        return None
 
 def export_dataframe(df, dir_path):
     if df is None or df.empty:
@@ -54,13 +68,18 @@ def export_dataframe(df, dir_path):
     except Exception as e:
         console.print(f"[bold red]Failed to export: {e}[/bold red]")
 
+# ── Duplicate detection ──────────────────────────────────────────────────
 def detect_duplicates_groupby(df):
     date_col = questionary.select("Select the datetime/timestamp column:", choices=list(df.columns)).ask()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
 
-    considered_cols = questionary.checkbox("Select columns to consider for duplication:", choices=[c for c in df.columns if c != date_col]).ask()
+    considered_cols = questionary.checkbox(
+        "Select columns to consider for duplication:",
+        choices=[c for c in df.columns if c != date_col]
+    ).ask()
 
     time_unit = questionary.select("Select time unit:", choices=["minute", "hour", "day", "month", "year"]).ask()
+
     # Build the period columns based on the selected unit
     if time_unit == "day":
         group_keys = [df[date_col].dt.year, df[date_col].dt.month, df[date_col].dt.day]
@@ -92,12 +111,18 @@ def detect_duplicates_groupby(df):
 def detect_duplicates_within_period(df):
     date_col = questionary.select("Select the datetime/timestamp column:", choices=list(df.columns)).ask()
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    considered_cols = questionary.checkbox("Select columns to consider for duplication:", choices=[c for c in df.columns if c != date_col]).ask()
+
+    considered_cols = questionary.checkbox(
+        "Select columns to consider for duplication:",
+        choices=[c for c in df.columns if c != date_col]
+    ).ask()
 
     unit = questionary.select("Select interval unit:", choices=["seconds", "minutes", "hours", "days"]).ask()
     interval_val = int(questionary.text(f"Enter the number of {unit} for the interval (e.g. 2):").ask())
+
     df = df.sort_values(by=date_col).reset_index(drop=True)
     interval = pd.to_timedelta(f"{interval_val} {unit}")
+
     idxs = set()
     for i, row in df.iterrows():
         lower = row[date_col]
@@ -110,14 +135,15 @@ def detect_duplicates_within_period(df):
                 idxs.add(j)
     return df.loc[sorted(idxs)].copy()
 
+# ── Entrypoint ───────────────────────────────────────────────────────────
 def main():
     console.print("[bold cyan]Time-based Duplicate Checker App[/bold cyan]")
     dir_path = _ask_directory()
-    file_path = select_csv_from_folder(dir_path)
+    file_path = select_data_file_from_folder(dir_path)
     if not file_path:
         return
 
-    df = read_csv_safely(file_path)
+    df = read_file_safely(file_path)
     if df is None:
         return
 
