@@ -7,15 +7,43 @@ import os
 
 console = Console()
 
-def read_csv_safely(path):
+# === FILE HANDLING ===
+
+def read_file_safely(path: Path):
+    """Read CSV or Excel file with multiple fallbacks."""
     try:
-        df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
-        if len(df.columns) == 1:
-            df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
-        return df
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            return pd.read_excel(path)
+        elif path.suffix.lower() == ".csv":
+            try:
+                df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+                if len(df.columns) == 1:  # maybe wrong delimiter
+                    df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
+                return df
+            except Exception:
+                return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
+        else:
+            console.print(f"[bold red]Unsupported file format: {path.suffix}[/bold red]")
+            return None
     except Exception as e:
         console.print(f"[bold red]Error reading file: {e}[/bold red]")
         return None
+
+def _ask_directory():
+    while True:
+        dir_path = Path(questionary.text("Enter the directory path:").ask()).expanduser()
+        if dir_path.is_dir():
+            return dir_path
+        console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")
+
+def select_file_from_folder(directory):
+    """List CSV & Excel files for selection."""
+    files = [f for f in os.listdir(directory) if f.lower().endswith((".csv", ".xlsx", ".xls"))]
+    if not files:
+        console.print("[bold red]No CSV or Excel files found in this directory.[/bold red]")
+        return None
+    file_choice = questionary.select("Select a file to clean:", choices=files + ["Back"]).ask()
+    return None if file_choice == "Back" else Path(directory) / file_choice
 
 # === CLEAN-UP FUNCTIONS ===
 
@@ -33,7 +61,7 @@ def clean_currency(series):
     return series.apply(fix_currency)
 
 def clean_datetime(series):
-    """Convert to standard YYYY-MM-DD or YYYY-MM-DD HH:MM:SS."""
+    """Convert to standard YYYY-MM-DD HH:MM:SS format."""
     return pd.to_datetime(series, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
 
 def clean_phone(series):
@@ -41,11 +69,11 @@ def clean_phone(series):
     def fix_phone(val):
         if pd.isna(val):
             return val
-        s = re.sub(r"[^\d+]", "", str(val))  # remove all non-numeric except +
+        s = re.sub(r"[^\d+]", "", str(val))  # keep only digits and '+'
         if s.startswith("62") and not s.startswith("+"):
             s = "+62" + s[2:]
         elif s.startswith("0"):
-            pass  # keep as is
+            pass  # already in local format
         elif s.startswith("+62"):
             pass  # already correct
         else:
@@ -53,29 +81,16 @@ def clean_phone(series):
         return s
     return series.apply(fix_phone)
 
-def _ask_directory():
-    while True:
-        dir_path = Path(questionary.text("Enter the directory path:").ask()).expanduser()
-        if dir_path.is_dir():
-            return dir_path
-        console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")
-
-def select_csv_from_folder(directory):
-    files = [f for f in os.listdir(directory) if f.endswith(".csv")]
-    if not files:
-        console.print("[bold red]No CSV files found in this directory.[/bold red]")
-        return None
-    file_choice = questionary.select("Select a CSV file to clean:", choices=files + ["Back"]).ask()
-    return None if file_choice == "Back" else os.path.join(directory, file_choice)
+# === MAIN FLOW ===
 
 def main():
-    console.print("[bold cyan]CSV Clean-Up Tool[/bold cyan]")
+    console.print("[bold cyan]CSV/Excel Clean-Up Tool[/bold cyan]")
     dir_answer = _ask_directory()
-    file_path = select_csv_from_folder(dir_answer)
+    file_path = select_file_from_folder(dir_answer)
     if not file_path:
         return
 
-    df = read_csv_safely(file_path)
+    df = read_file_safely(file_path)
     if df is None:
         return
 

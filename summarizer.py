@@ -7,92 +7,25 @@ import os
 
 console = Console()
 
-def read_csv_safely(path):
-    """Robust CSV reader with fallback handling."""
+# ───────────────────────── file helpers ─────────────────────────
+
+def read_table_safely(path: Path) -> pd.DataFrame | None:
+    """Read CSV or Excel with simple fallbacks."""
     try:
-        df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
-        if len(df.columns) == 1:
-            df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
-        return df
+        suf = path.suffix.lower()
+        if suf in (".xlsx", ".xls"):
+            return pd.read_excel(path)
+        # CSV branch
+        try:
+            df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+            if len(df.columns) == 1:
+                df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
+            return df
+        except Exception:
+            return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
     except Exception as e:
         console.print(f"[bold red]Error reading file: {e}[/bold red]")
         return None
-
-def summarize_csv(df):
-    """Generate a descriptive summary of the dataset."""
-    console.print("\n[bold blue]📊 CSV Summary Report[/bold blue]")
-
-    # Row and column info
-    console.print(f"[bold]Total Rows:[/bold] {df.shape[0]}")
-    console.print(f"[bold]Total Columns:[/bold] {df.shape[1]}")
-
-    # Missing values
-    missing_info = df.isna().sum()
-    console.print("\n[bold yellow]🛠 Missing Values:[/bold yellow]")
-    for col, missing in missing_info.items():
-        status = f"[red]{missing} missing[/red]" if missing > 0 else "[green]OK[/green]"
-        console.print(f" - {col}: {status}")
-
-    # Primary key selection
-    pk_column = questionary.select(
-        "Select the primary key column:", choices=list(df.columns) + ["None"]
-    ).ask()
-    if pk_column == "None":
-        pk_column = None
-
-    if pk_column:
-        missing_pk = df[pk_column].isna().sum()
-        if missing_pk > 0:
-            console.print(f"[bold red]❌ Missing values in primary key '{pk_column}': {missing_pk}[/bold red]")
-        else:
-            console.print(f"[bold green]✅ No missing values in primary key '{pk_column}'[/bold green]")
-
-        pk_dupes = df.duplicated(subset=[pk_column]).sum()
-        if pk_dupes > 0:
-            console.print(f"[bold red]❌ Duplicate primary keys found: {pk_dupes}[/bold red]")
-        else:
-            console.print("[bold green]✅ No duplicate primary keys[/bold green]")
-
-    # Quick stats for numeric columns
-    numeric_cols = df.select_dtypes(include="number").columns
-    if len(numeric_cols) > 0:
-        console.print("\n[bold cyan]📈 Numeric Column Statistics[/bold cyan]")
-        stats_table = Table(show_header=True, header_style="bold magenta")
-        stats_table.add_column("Column")
-        stats_table.add_column("Mean")
-        stats_table.add_column("Median")
-        stats_table.add_column("Min")
-        stats_table.add_column("Max")
-        stats_table.add_column("Sum")
-        for col in numeric_cols:
-            stats_table.add_row(
-                col,
-                f"{df[col].mean():.2f}",
-                f"{df[col].median():.2f}",
-                f"{df[col].min():.2f}",
-                f"{df[col].max():.2f}",
-                f"{df[col].sum():.2f}"
-            )
-        console.print(stats_table)
-
-    # Frequency counts for categorical columns
-    cat_cols = df.select_dtypes(exclude="number").columns
-    if len(cat_cols) > 0:
-        console.print("\n[bold cyan]📋 Top Values for Categorical Columns[/bold cyan]")
-        for col in cat_cols:
-            console.print(f"[bold]{col}[/bold]:")
-            freq = df[col].value_counts(dropna=False).head(5)
-            for val, count in freq.items():
-                console.print(f"   - {val}: {count} ({count / len(df) * 100:.1f}%)")
-
-    # Date range for datetime columns
-    date_cols = df.select_dtypes(include="datetime").columns
-    if len(date_cols) > 0:
-        console.print("\n[bold cyan]📅 Date Ranges[/bold cyan]")
-        for col in date_cols:
-            console.print(f"{col}: {df[col].min()} → {df[col].max()}")
-
-    console.print("\n[bold blue]✅ Summary complete.[/bold blue]")
 
 def _ask_directory() -> Path:
     """Loop until the user enters an existing directory path."""
@@ -102,60 +35,227 @@ def _ask_directory() -> Path:
             return dir_path
         console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")
 
-def select_csv_from_data_folder(directory):
-    """Choose a CSV file interactively from the directory."""
-    files = [f for f in os.listdir(directory) if f.endswith(".csv")]
+def select_file_from_folder(directory: Path) -> Path | None:
+    """Choose a CSV/XLSX/XLS file interactively from the directory."""
+    files = [f for f in os.listdir(directory) if f.lower().endswith((".csv", ".xlsx", ".xls"))]
     if not files:
-        console.print("[bold red]No CSV files found in that folder.[/bold red]")
+        console.print("[bold red]No CSV or Excel files found in that folder.[/bold red]")
         return None
-    file_choice = questionary.select("Select a CSV file to summarize:", choices=files + ["Back"]).ask()
-    return None if file_choice == "Back" else os.path.join(directory, file_choice)
+    file_choice = questionary.select("Select a file to summarize:", choices=files + ["Back"]).ask()
+    return None if file_choice == "Back" else Path(directory) / file_choice
 
-def export_missing_rows(df, directory):
-    """Export rows with missing values in selected columns."""
-    console.print("\n[bold cyan]Export Rows with Missing Data[/bold cyan]")
+# ───────────────────────── summarizer core ───────────────────────
 
-    cols_input = questionary.text(
-        "Enter column name(s) to check (comma-separated), or type 'cancel' to exit:"
+def _print_basic_overview(df: pd.DataFrame):
+    console.print("\n[bold blue]📊 Dataset Summary[/bold blue]")
+    console.print(f"[bold]Total Rows:[/bold] {df.shape[0]}")
+    console.print(f"[bold]Total Columns:[/bold] {df.shape[1]}")
+
+    # Missing values
+    console.print("\n[bold yellow]🛠 Missing Values by Column[/bold yellow]")
+    missing_info = df.isna().sum()
+    for col, missing in missing_info.items():
+        status = f"[red]{missing} missing[/red]" if missing > 0 else "[green]OK[/green]"
+        console.print(f" - {col}: {status}")
+
+def _maybe_pick_primary_key_and_report(df: pd.DataFrame):
+    pk_column = questionary.select(
+        "Select the primary key column (or None):", choices=list(df.columns) + ["None"]
     ).ask()
-    if cols_input.strip().lower() == "cancel":
+    if pk_column == "None":
+        return
+    missing_pk = df[pk_column].isna().sum()
+    if missing_pk > 0:
+        console.print(f"[bold red]❌ Missing values in primary key '{pk_column}': {missing_pk}[/bold red]")
+    else:
+        console.print(f"[bold green]✅ No missing values in primary key '{pk_column}'[/bold green]")
+
+    pk_dupes = df.duplicated(subset=[pk_column]).sum()
+    if pk_dupes > 0:
+        console.print(f"[bold red]❌ Duplicate primary keys found: {pk_dupes}[/bold red]")
+    else:
+        console.print("[bold green]✅ No duplicate primary keys[/bold green]")
+
+def _print_numeric_insights(df: pd.DataFrame):
+    num_cols = df.select_dtypes(include="number").columns
+    if len(num_cols) == 0:
         return
 
-    selected_cols = [col.strip() for col in cols_input.split(",")]
-    invalid = [col for col in selected_cols if col not in df.columns]
-    if invalid:
-        console.print(f"[bold red]Invalid column(s): {', '.join(invalid)}[/bold red]")
-        return
+    console.print("\n[bold cyan]📈 Numeric Column Statistics (overview)[/bold cyan]")
+    stats_table = Table(show_header=True, header_style="bold magenta")
+    stats_table.add_column("Column")
+    stats_table.add_column("Mean")
+    stats_table.add_column("Median")
+    stats_table.add_column("Min")
+    stats_table.add_column("Max")
+    stats_table.add_column("Sum")
 
-    missing_df = df[df[selected_cols].isnull().any(axis=1)]
-    if missing_df.empty:
-        console.print("[bold green]No missing values found in the selected column(s).[/bold green]")
-        return
+    for col in num_cols:
+        stats_table.add_row(
+            col,
+            f"{df[col].mean():.2f}",
+            f"{df[col].median():.2f}",
+            f"{df[col].min():.2f}",
+            f"{df[col].max():.2f}",
+            f"{df[col].sum():.2f}",
+        )
+    console.print(stats_table)
 
-    file_format = questionary.select("Choose the export format:", choices=["CSV", "XLSX"]).ask()
-    file_name = questionary.text("Enter the file name (without extension):").ask()
-    export_path = Path(directory) / f"{file_name}.{file_format.lower()}"
+    # Ask how to treat zeros for "smallest" slice
+    exclude_zeros = questionary.confirm(
+        "For 'smallest values' lists, exclude zeros?", default=True
+    ).ask()
 
-    try:
-        if file_format == "CSV":
-            missing_df.to_csv(export_path, index=False)
+    # Top max/min per numeric column
+    console.print("\n[bold cyan]🔎 Extremes per numeric column[/bold cyan]")
+    for col in num_cols:
+        s = df[col].dropna()
+        if exclude_zeros:
+            s_min = s[s != 0]
         else:
-            missing_df.to_excel(export_path, index=False)
-        console.print(f"[bold green]Exported {len(missing_df)} rows to {export_path}[/bold green]")
-    except Exception as e:
-        console.print(f"[bold red]Export failed: {e}[/bold red]")
+            s_min = s
+
+        top_max = s.sort_values(ascending=False).head(10)
+        top_min = s_min.sort_values(ascending=True).head(10)
+
+        console.print(f"\n[bold]{col}[/bold]")
+        # Max 10
+        table_max = Table(title="Top 10 Max", show_header=True, header_style="bold magenta")
+        table_max.add_column("Value"); table_max.add_column("Row Index")
+        for idx, val in top_max.items():
+            table_max.add_row(f"{val}", str(idx))
+        console.print(table_max)
+
+        # Min 10
+        if not top_min.empty:
+            table_min = Table(title=f"Top 10 Min{' (non-zero)' if exclude_zeros else ''}", show_header=True, header_style="bold magenta")
+            table_min.add_column("Value"); table_min.add_column("Row Index")
+            for idx, val in top_min.items():
+                table_min.add_row(f"{val}", str(idx))
+            console.print(table_min)
+        else:
+            console.print("[italic]No non-zero values for min list.[/italic]")
+
+def _coerce_datetimes_for_info(df: pd.DataFrame) -> list[str]:
+    """
+    Try to detect datetime-like columns (lightweight).
+    We attempt conversion for object columns; if >70% parseable, treat as datetime.
+    """
+    date_cols = []
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            date_cols.append(col)
+        elif pd.api.types.is_object_dtype(df[col]):
+            parsed = pd.to_datetime(df[col], errors="coerce", infer_datetime_format=True)
+            ratio = parsed.notna().mean()
+            if ratio >= 0.7:
+                df[col] = parsed
+                date_cols.append(col)
+    return date_cols
+
+def _print_date_ranges(df: pd.DataFrame):
+    date_cols = _coerce_datetimes_for_info(df.copy())
+    if len(date_cols) == 0:
+        return
+    console.print("\n[bold cyan]📅 Date Ranges[/bold cyan]")
+    for col in date_cols:
+        console.print(f"{col}: {df[col].min()} → {df[col].max()}")
+
+def _top_frequencies(df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Return a dict of value_counts for all columns."""
+    freq_map = {}
+    for col in df.columns:
+        vc = df[col].value_counts(dropna=False)
+        freq_map[col] = vc
+    return freq_map
+
+def _print_top10_frequencies(freq_map: dict[str, pd.Series], total_rows: int):
+    console.print("\n[bold cyan]📋 Top 10 Frequencies per Column[/bold cyan]")
+    for col, vc in freq_map.items():
+        console.print(f"[bold]{col}[/bold]:")
+        top10 = vc.head(10)
+        for val, count in top10.items():
+            pct = (count / total_rows * 100) if total_rows > 0 else 0.0
+            console.print(f"  - {val}: {count} ({pct:.1f}%)")
+
+def _export_frequencies(freq_map: dict[str, pd.Series], src_path: Path, dir_path: Path):
+    """Export all/selected column frequencies to CSV files or single Excel workbook with sheets."""
+    if not freq_map:
+        console.print("[bold yellow]No frequency data to export.[/bold yellow]")
+        return
+
+    scope = questionary.select(
+        "Export frequencies for…",
+        choices=["All columns", "Select columns", "Cancel"]
+    ).ask()
+    if scope == "Cancel":
+        return
+
+    if scope == "Select columns":
+        cols = list(freq_map.keys())
+        chosen = questionary.checkbox("Pick columns to export:", choices=cols).ask()
+        if not chosen:
+            console.print("[yellow]No columns chosen — skipping export.[/yellow]")
+            return
+        freq_map = {c: freq_map[c] for c in chosen}
+
+    fmt = questionary.select("Export format:", choices=["CSV (one file per column)", "Excel (one workbook, multiple sheets)"]).ask()
+
+    out_dir = dir_path / f"{src_path.stem}_stats"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if fmt.startswith("CSV"):
+        for col, vc in freq_map.items():
+            safe_name = f"{col}_stats.csv"
+            out_path = out_dir / safe_name
+            vc.rename("count").to_frame().to_csv(out_path)
+        console.print(f"[bold green]Saved CSV frequency tables in: {out_dir}[/bold green]")
+    else:
+        out_xlsx = out_dir / f"{src_path.stem}_stats.xlsx"
+        try:
+            with pd.ExcelWriter(out_xlsx, engine="xlsxwriter") as xw:
+                for col, vc in freq_map.items():
+                    # Excel sheet names max 31 chars; sanitize
+                    sheet = str(col)[:31].replace("/", "_").replace("\\", "_").replace("*", "_").replace("?", "_").replace("]", "_").replace("[", "_").replace(":", "_")
+                    vc.rename("count").to_frame().to_excel(xw, sheet_name=sheet)
+            console.print(f"[bold green]Saved Excel frequency workbook: {out_xlsx}[/bold green]")
+        except Exception as e:
+            console.print(f"[bold red]Failed to save Excel: {e}[/bold red]")
+
+# ───────────────────────── entrypoint ─────────────────────────
+
+def summarize_file(path: Path, base_dir: Path):
+    df = read_table_safely(path)
+    if df is None:
+        return
+
+    # 1) Overview + missing + PK checks
+    _print_basic_overview(df)
+    _maybe_pick_primary_key_and_report(df)
+
+    # 2) Numeric insights (stats + top max/min)
+    _print_numeric_insights(df)
+
+    # 3) Date ranges (light inference)
+    _print_date_ranges(df)
+
+    # 4) Top 10 frequencies per column
+    freq_map = _top_frequencies(df)
+    _print_top10_frequencies(freq_map, len(df))
+
+    # 5) Export frequencies?
+    if questionary.confirm("Do you want to export the frequency tables?", default=True).ask():
+        _export_frequencies(freq_map, path, base_dir)
+
+    console.print("\n[bold blue]✅ Summary complete.[/bold blue]")
 
 def main():
-    console.print("[bold cyan]CSV Summarizer Tool[/bold cyan]")
+    console.print("[bold cyan]CSV/Excel Summarizer Tool[/bold cyan]")
     dir_answer = _ask_directory()
-    file_path = select_csv_from_data_folder(dir_answer)
-
-    if file_path:
-        df = read_csv_safely(file_path)
-        if df is not None:
-            summarize_csv(df)
-            if questionary.confirm("Do you want to export rows with missing data?").ask():
-                export_missing_rows(df, dir_answer)
+    file_path = select_file_from_folder(dir_answer)
+    if not file_path:
+        return
+    summarize_file(file_path, dir_answer)
 
 if __name__ == "__main__":
     main()

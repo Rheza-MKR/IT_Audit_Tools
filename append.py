@@ -15,40 +15,49 @@ def ask_directory() -> Path:
         console.print(f"[bold red]Directory '{p}' not found – try again.[/bold red]")
 
 
-def list_csv_files(folder: Path):
-    return [f.name for f in folder.glob("*.csv")]
+def list_data_files(folder: Path):
+    """List all CSV and Excel files in a folder."""
+    return [f.name for f in folder.glob("*") if f.suffix.lower() in (".csv", ".xlsx", ".xls")]
 
 
 def select_multiple_csv_files(folder: Path):
-    files = list_csv_files(folder)
+    files = list_data_files(folder)
     if not files:
-        console.print("[bold red]No CSV files in that folder.[/bold red]")
+        console.print("[bold red]No Excel/CSV files in that folder.[/bold red]")
         return None
-    choices = questionary.checkbox("✅ Select CSV files to append:", choices=files).ask()
+    choices = questionary.checkbox("✅ Select files to append:", choices=files).ask()
     return choices if choices and len(choices) >= 2 else None
 
 
-def read_csv_safely(path: Path) -> pd.DataFrame | None:
-    for kwargs in (dict(delimiter=None),
-                   dict(separator=';'),
-                   dict(encoding='latin-1')):
-        try:
-            return pd.read_csv(path, on_bad_lines="skip", low_memory=False, **kwargs)
-        except Exception:
-            continue
-    console.print(f"[bold red]❌  Could not open {path.name}[/bold red]")
-    return None
+def read_file_safely(path: Path) -> pd.DataFrame | None:
+    """Read CSV or Excel safely with multiple fallbacks."""
+    try:
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            return pd.read_excel(path)
+        elif path.suffix.lower() == ".csv":
+            # Try multiple read_csv configs
+            for kwargs in (dict(), dict(sep=";"), dict(encoding="latin-1")):
+                try:
+                    return pd.read_csv(path, on_bad_lines="skip", low_memory=False, **kwargs)
+                except Exception:
+                    continue
+        else:
+            console.print(f"[bold red]❌ Unsupported file format: {path.suffix}[/bold red]")
+            return None
+    except Exception as e:
+        console.print(f"[bold red]❌ Could not open {path.name}: {e}[/bold red]")
+        return None
 
 
 def append_unique_rows(folder: Path, files: list[str], unique_columns: list[str]):
-    base_df = read_csv_safely(folder / files[0])
+    base_df = read_file_safely(folder / files[0])
     if base_df is None:
         return
 
     base_df = base_df.drop_duplicates(subset=unique_columns)
 
     for i in range(1, len(files)):
-        next_df = read_csv_safely(folder / files[i])
+        next_df = read_file_safely(folder / files[i])
         if next_df is None:
             continue
 
@@ -95,7 +104,7 @@ def main():
         console.print("[red]Please select at least two CSV files.[/red]")
         return
 
-    sample_df = read_csv_safely(folder / files[0])
+    sample_df = read_file_safely(folder / files[0])
     if sample_df is None:
         return
 

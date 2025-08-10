@@ -7,6 +7,8 @@ import questionary
 
 console = Console()
 
+# ───────────────────────── file helpers ─────────────────────────
+
 def _ask_directory() -> Path:
     while True:
         dir_path = Path(questionary.text("Enter the audit directory path:").ask()).expanduser().resolve()
@@ -14,80 +16,115 @@ def _ask_directory() -> Path:
             return dir_path
         console.print(f"[bold red]Directory '{dir_path}' does not exist – try again.[/bold red]")
 
-def select_csv_from_folder(directory, prompt="Select a CSV file to analyze:"):
-    """List CSV files in the given directory and prompt user to select one."""
-    files = [f for f in os.listdir(directory) if f.endswith('.csv')]
-    if not files:
-        print("No CSV files found in the selected directory.")
-        return None
-    question = [inquirer.List('file', message=prompt, choices=files)]
-    answer = inquirer.prompt(question)
-    return Path(directory) / answer['file'] if answer else None
+def _list_tabular_files(directory: Path):
+    """CSV & Excel."""
+    return sorted([f for f in os.listdir(directory) if f.lower().endswith((".csv", ".xlsx", ".xls"))])
 
-def get_columns(csv_file):
-    """Get column names from a CSV file."""
+def select_file_from_folder(directory: Path, prompt="Select a file to analyze:") -> Path | None:
+    files = _list_tabular_files(directory)
+    if not files:
+        console.print("[bold red]No CSV or Excel files found in the selected directory.[/bold red]")
+        return None
+    answer = inquirer.prompt([inquirer.List("file", message=prompt, choices=files)])
+    return (Path(directory) / answer["file"]) if answer else None
+
+def read_table_safely(path: Path) -> pd.DataFrame | None:
+    """Open CSV or Excel with a couple of fallbacks."""
     try:
-        df = pd.read_csv(csv_file, encoding='utf-8', delimiter=',', on_bad_lines='skip', nrows=1)
+        suf = path.suffix.lower()
+        if suf in (".xlsx", ".xls"):
+            return pd.read_excel(path)
+        # CSV branch
+        try:
+            df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+            if len(df.columns) == 1:  # wrong delimiter?
+                df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
+            return df
+        except Exception:
+            return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
+    except Exception as e:
+        console.print(f"[bold red]Error reading {path.name}: {e}[/bold red]")
+        return None
+
+def get_columns(file_path: Path):
+    """Read just enough to get columns (CSV or Excel)."""
+    try:
+        if file_path.suffix.lower() in (".xlsx", ".xls"):
+            df = pd.read_excel(file_path, nrows=1)
+        else:
+            df = pd.read_csv(file_path, encoding="utf-8", on_bad_lines="skip", nrows=1)
+            if len(df.columns) == 1:
+                df = pd.read_csv(file_path, encoding="utf-8", sep=";", on_bad_lines="skip", nrows=1)
         return df.columns.tolist()
     except Exception as e:
-        print(f"Error reading {csv_file}: {e}")
+        print(f"Error reading {file_path.name}: {e}")
         return []
 
 def select_column(columns, prompt):
-    """Prompt user to select a column."""
-    question = [inquirer.List('column', message=prompt, choices=columns)]
-    answer = inquirer.prompt(question)
-    return answer['column'] if answer else None
+    answer = inquirer.prompt([inquirer.List("column", message=prompt, choices=columns)])
+    return answer["column"] if answer else None
 
-def check_data_format(df, column):
-    """Check for missing values, special characters, or negative values in a column."""
+# ───────────────────────── recon logic ─────────────────────────
+
+def check_data_format(df: pd.DataFrame, column: str):
+    """Quick hygiene checks; non-fatal."""
     errors = []
-    df[column] = df[column].astype(str).str.strip()
-
-    if df[column].isnull().any():
+    # check missing BEFORE coercing to str
+    if df[column].isna().any():
         errors.append("Missing values detected.")
-
-    special_char_mask = df[column].str.contains(r'[^\w\s]', regex=True, na=False)
-    if special_char_mask.any():
+    s = df[column].astype(str).str.strip()
+    # special chars (non word/space)
+    if s.str.contains(r"[^\w\s]", regex=True, na=False).any():
         errors.append("Special characters detected.")
-
-    if df[column].str.replace('.', '', 1).str.isnumeric().all():
-        if (df[column].astype(float) < 0).any():
-            errors.append("Negative values detected.")
-
+    # numeric & negatives
+    numeric_mask = s.str.replace(".", "", 1, regex=False).str.isnumeric()
+    if numeric_mask.all():
+        try:
+            if (s.astype(float) < 0).any():
+                errors.append("Negative values detected.")
+        except Exception:
+            pass
     return errors
 
 def select_reconcile_method():
-    """Prompt user to select a reconciliation method."""
-    question = [inquirer.List('reconcile_method', message="Select reconciliation method:", choices=[
-        "Standard (full match)", "First N characters", "Last N characters"
-    ])]
-    answer = inquirer.prompt(question)
-    method = answer['reconcile_method'] if answer else None
+    q = [inquirer.List(
+        "reconcile_method",
+        message="Select reconciliation method:",
+        choices=["Standard (full match)", "First N characters", "Last N characters"]
+    )]
+    ans = inquirer.prompt(q)
+    method = ans["reconcile_method"] if ans else None
 
     num_chars = None
     if method in ["First N characters", "Last N characters"]:
         num_chars_input = inquirer.text("Enter number of characters:")
         try:
             num_chars = int(num_chars_input)
-        except:
+        except Exception:
             print("Invalid number.")
             return None, None
-
     return method, num_chars
 
 def select_export_format():
-    """Prompt user to select an export file format (CSV or XLSX)."""
-    question = [inquirer.List('export_format', message="Select an export format:", choices=["CSV", "XLSX"])]
-    answer = inquirer.prompt(question)
-    return answer['export_format'] if answer else None
+    ans = inquirer.prompt([inquirer.List("export_format",
+                                         message="Select an export format:",
+                                         choices=["CSV", "XLSX"])])
+    return ans["export_format"] if ans else None
 
-def reconcile_files(file1_path, file2_path, key_column1, key_column2, method, num_chars):
+def _export_df(df: pd.DataFrame, out_path: Path):
     try:
-        df1 = pd.read_csv(file1_path, encoding='utf-8', on_bad_lines='skip')
-        df2 = pd.read_csv(file2_path, encoding='utf-8', on_bad_lines='skip')
+        if out_path.suffix.lower() == ".csv":
+            df.to_csv(out_path, index=False)
+        else:
+            df.to_excel(out_path, index=False)
+        print(f"Saved: {out_path}")
     except Exception as e:
-        print(f"Error reading files: {e}")
+        print(f"Error saving: {e}")
+
+def reconcile_files(file1_path: Path, file2_path: Path, key_column1: str, key_column2: str, method: str, num_chars: int | None):
+    df1 = read_table_safely(file1_path)
+    df2 = read_table_safely(file2_path)
+    if df1 is None or df2 is None:
         return None
 
     errors1 = check_data_format(df1, key_column1)
@@ -96,13 +133,13 @@ def reconcile_files(file1_path, file2_path, key_column1, key_column2, method, nu
     if errors1 or errors2:
         print("\nData Format Issues:")
         if errors1:
-            print(f"Issues in {file1_path.name} - {key_column1}: {', '.join(errors1)}")
+            print(f" - {file1_path.name} / {key_column1}: {', '.join(errors1)}")
         if errors2:
-            print(f"Issues in {file2_path.name} - {key_column2}: {', '.join(errors2)}")
-
+            print(f" - {file2_path.name} / {key_column2}: {', '.join(errors2)}")
         if not inquirer.confirm("Continue despite data issues?", default=False):
             return None
 
+    # normalize match columns
     df1[key_column1] = df1[key_column1].astype(str).str.strip()
     df2[key_column2] = df2[key_column2].astype(str).str.strip()
 
@@ -113,39 +150,46 @@ def reconcile_files(file1_path, file2_path, key_column1, key_column2, method, nu
         df1[key_column1] = df1[key_column1].str[-num_chars:]
         df2[key_column2] = df2[key_column2].str[-num_chars:]
 
-    matched = df1[df1[key_column1].isin(df2[key_column2])]
+    matched   = df1[df1[key_column1].isin(df2[key_column2])]
     unmatched = df1[~df1[key_column1].isin(df2[key_column2])]
 
-    print(f"\nReconciliation Summary:")
+    print("\nReconciliation Summary:")
     print(f"Records in {file1_path.name}: {len(df1)}")
-    print(f"Matched: {len(matched)}")
+    print(f"Matched:   {len(matched)}")
     print(f"Unmatched: {len(unmatched)}")
 
     if inquirer.confirm("Export unmatched records?", default=True):
         fmt = select_export_format()
-        output_file = Path(file1_path.parent) / f"unmatched_{file1_path.stem}.{fmt.lower()}"
-        try:
-            if fmt == "CSV":
-                unmatched.to_csv(output_file, index=False)
-            else:
-                unmatched.to_excel(output_file, index=False)
-            print(f"Saved: {output_file}")
-        except Exception as e:
-            print(f"Error saving: {e}")
+        if not fmt:
+            return None
+        out_path = file1_path.parent / f"unmatched_{file1_path.stem}.{fmt.lower()}"
+        _export_df(unmatched, out_path)
+
+    return matched, unmatched
+
+# ───────────────────────── entrypoint ─────────────────────────
 
 def main():
     data_dir = _ask_directory()
     print("[Reconciliation App]")
 
-    file1_path = select_csv_from_folder(data_dir, "Select main file:")
+    file1_path = select_file_from_folder(data_dir, "Select main file:")
     if not file1_path:
         return
-    file2_path = select_csv_from_folder(data_dir, "Select reference file:")
+    file2_path = select_file_from_folder(data_dir, "Select reference file:")
     if not file2_path:
         return
 
-    col1 = select_column(get_columns(file1_path), f"Column to match in {file1_path.name}")
-    col2 = select_column(get_columns(file2_path), f"Column to match in {file2_path.name}")
+    cols1 = get_columns(file1_path)
+    cols2 = get_columns(file2_path)
+    if not cols1 or not cols2:
+        return
+
+    col1 = select_column(cols1, f"Column to match in {file1_path.name}")
+    col2 = select_column(cols2, f"Column to match in {file2_path.name}")
+    if not col1 or not col2:
+        return
+
     method, num_chars = select_reconcile_method()
     if method is None:
         return

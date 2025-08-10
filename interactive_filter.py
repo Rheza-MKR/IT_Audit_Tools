@@ -1,69 +1,100 @@
 #!/usr/bin/env python3
 """
-Interactive CSV Filter Tool
-───────────────────────────
-1. Ask for data folder
-2. Ask whether to *filter-IN* (keep) or *filter-OUT* (remove) rows
-3. Build filters with helpful hints
-4. Allow chaining more filters until the user stops
-5. Export the final DataFrame (CSV / XLSX)
+Interactive Table Filter Tool (CSV/Excel)
+─────────────────────────────────────────
+1) Pick folder and CSV/XLSX/XLS file (Excel sheet if multiple)
+2) Choose filter mode: keep matching (IN) or remove matching (OUT)
+3) Enter one or more filters (comma-separated), preview, then apply
+4) Chain more filters
+5) Export final result (CSV/XLSX)
 """
-import os
 from pathlib import Path
+import os
+import re
 import pandas as pd
 import questionary
+from questionary import Choice
 from rich.console import Console
 from rich.table import Table
 from difflib import get_close_matches
-import re
-from questionary import Choice
 
 console = Console()
 
-# ───────────────────────────── helpers ──────────────────────────────
+# ───────────────────────── config ─────────────────────────
+
+# Operator -> human hint
 OPERATORS = {
-    '%=': 'contains',
-    '==': 'equals',
-    '>=': '≥',
-    '<=': '≤',
-    '>':  '>',
-    '<':  '<',
+    '%=':  'contains',
+    '!%=': 'does NOT contain',
+    '==':  'equals',
+    '!=':  'not equal',
+    '^=':  'starts with',
+    '=^':  'ends with',
+    '>=':  '≥',
+    '<=':  '≤',
+    '>':   '>',
+    '<':   '<',
 }
 
+# Special "operators" (keyword at end of expression)
 SPECIAL_FILTERS = {
-    'isalpha':  "column contains letters [A–Z]",
-    'isdigit':  "column contains digits [0-9]",
-    'isspecial':"column contains special characters",
+    'isalpha':    "column contains letters [A–Z]",
+    'isdigit':    "column contains digits [0–9]",
+    'isspecial':  "column contains special characters",
+    'isempty':    "column is empty (or NaN)",
+    'isnotempty': "column is not empty",
 }
+
+# Parse priority (longest first so we don't misread '!=' as '!')
+OP_PARSE_ORDER = ['!%=', '>=', '<=', '!=', '%=', '^=', '=^', '==', '>', '<']
+
+# ─────────────────────── file helpers ──────────────────────
 
 def ask_directory() -> Path:
     while True:
-        p = Path(questionary.path("📂  Enter folder containing CSV files:").ask()).expanduser()
+        p = Path(questionary.path("📂  Enter folder containing data files:").ask()).expanduser()
         if p.is_dir():
             return p
         console.print(f"[bold red]Directory '{p}' not found – try again.[/bold red]")
 
-def list_csv_files(folder: Path):
-    return [f.name for f in folder.glob("*.csv")]
+def list_table_files(folder: Path):
+    return sorted([f.name for f in folder.iterdir() if f.suffix.lower() in {'.csv', '.xlsx', '.xls'}])
 
-def select_csv_file(folder: Path) -> Path | None:
-    csvs = list_csv_files(folder)
-    if not csvs:
-        console.print("[bold red]No CSV files in that folder.[/bold red]")
-        return None
-    pick = questionary.select("Select a CSV file:", choices=csvs + ["<Back>"]).ask()
-    return None if pick == "<Back>" else folder / pick
-
-def read_csv_safely(path: Path) -> pd.DataFrame | None:
-    for kwargs in (dict(delimiter=None),
-                   dict(separator=';'),
-                   dict(encoding='latin-1')):
+def select_table_file(folder: Path) -> tuple[Path, str | None]:
+    files = list_table_files(folder)
+    if not files:
+        console.print("[bold red]No CSV or Excel files in that folder.[/bold red]")
+        return None, None
+    pick = questionary.select("Select a file:", choices=files + ["<Back>"]).ask()
+    if pick == "<Back>":
+        return None, None
+    path = folder / pick
+    sheet = None
+    if path.suffix.lower() in {'.xlsx', '.xls'}:
         try:
-            return pd.read_csv(path, on_bad_lines="skip", low_memory=False, **kwargs)
+            xl = pd.ExcelFile(path)
+            if len(xl.sheet_names) > 1:
+                sheet = questionary.select("Select sheet:", choices=xl.sheet_names).ask()
+        except Exception as e:
+            console.print(f"[bold red]Failed reading Excel: {e}[/bold red]")
+            return None, None
+    return path, sheet
+
+def read_table_safely(path: Path, sheet: str | None) -> pd.DataFrame | None:
+    try:
+        if path.suffix.lower() in {'.xlsx', '.xls'}:
+            return pd.read_excel(path, sheet_name=sheet) if sheet else pd.read_excel(path)
+        # CSV
+        try:
+            df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
+            if len(df.columns) == 1:
+                df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
+            return df
         except Exception:
-            continue
-    console.print(f"[bold red]❌  Could not open {path.name}[/bold red]")
-    return None
+            return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
+    except Exception as e:
+        console.print(f"[bold red]❌  Could not open {path.name}: {e}[/bold red]")
+        return None
 
 def show_dataframe(df: pd.DataFrame, max_rows: int = 10):
     table = Table(show_header=True, header_style="bold magenta")
@@ -74,123 +105,151 @@ def show_dataframe(df: pd.DataFrame, max_rows: int = 10):
     console.print(table)
 
 def find_similar(col: str, options) -> str | None:
-    matches = get_close_matches(col, options, n=1, cutoff=0.6)
-    return matches[0] if matches else None
+    m = get_close_matches(col, options, n=1, cutoff=0.6)
+    return m[0] if m else None
 
-# ────────────────────────── build filters ──────────────────────────
-def build_filters(df: pd.DataFrame) -> list[tuple[str, str, str | float]]:
+# ────────────────────── filter building ─────────────────────
+
+def build_filters(df: pd.DataFrame) -> list[tuple[str, str, str | float | None]]:
     """
-    Build and return a list of filter rules.
-    Each rule is (column, operator, value or None).
+    Return list of filter rules: (column, operator|special, value_or_None).
+    Accepts multiple rules separated by commas in one input.
     """
-    console.print("\n[bold yellow]Columns:[/bold yellow] " + ", ".join(df.columns))
-    console.print("[italic]Supported operators:[/italic]  " +
-                  ", ".join(f"{k}  ({v})" for k, v in OPERATORS.items()))
-    console.print("[italic]Special keywords:[/italic]  " +
+    console.print("\n[bold yellow]Columns:[/bold yellow] " + ", ".join(map(str, df.columns)))
+    console.print("[italic]Operators:[/italic]  " +
+                  ", ".join(f"{k} ({v})" for k, v in OPERATORS.items()))
+    console.print("[italic]Special:[/italic]  " +
                   ", ".join(f"{k} → {v}" for k, v in SPECIAL_FILTERS.items()))
 
-    raw_input = questionary.text("Enter filters (e.g. Amount >= 1000, Description %= refund):").ask()
+    raw_input = questionary.text(
+        "Enter filters (e.g. Amount >= 1000, Description %= refund, Code ^= ABC):"
+    ).ask()
     if not raw_input:
         raise ValueError("No filters provided.")
 
     rules = []
-
     for raw in [x.strip() for x in raw_input.split(",") if x.strip()]:
-        # Check for special keyword operators
+        # special keyword?
+        found_special = False
         for keyword in SPECIAL_FILTERS:
             if raw.endswith(keyword):
                 col = raw[:-len(keyword)].strip()
                 op = keyword
                 val = None
+                found_special = True
                 break
-        else:
-            op = next((o for o in OPERATORS if o in raw), None)
+        if not found_special:
+            # normal operator
+            op = None
+            for cand in OP_PARSE_ORDER:
+                if cand in raw:
+                    op = cand
+                    break
             if not op:
                 raise ValueError(f"No valid operator found in filter: {raw}")
             col, val = map(str.strip, raw.split(op, 1))
 
         if col not in df.columns:
             suggestion = find_similar(col, df.columns)
-            if suggestion and questionary.confirm(f"Did you mean '{suggestion}'?").ask():
+            if suggestion and questionary.confirm(f"Did you mean '{suggestion}' for '{col}'?").ask():
                 col = suggestion
             else:
                 raise ValueError(f"Unknown column: {col}")
 
-        if op not in SPECIAL_FILTERS and pd.api.types.is_numeric_dtype(df[col]):
-            try:
-                val = float(val)
-            except ValueError:
-                raise ValueError(f"Value for numeric column '{col}' must be a number.")
-
+        # numeric coercion when appropriate
+        if (op not in SPECIAL_FILTERS) and (op not in {'%=', '!%=', '^=', '=^'}):
+            if pd.api.types.is_numeric_dtype(df[col]):
+                try:
+                    val = float(val)
+                except ValueError:
+                    raise ValueError(f"Value for numeric column '{col}' must be a number.")
         rules.append((col, op, val))
-
     return rules
 
 def apply_filter(df: pd.DataFrame, rule, mode: str) -> pd.DataFrame:
     """
-    Apply one filter; mode is 'in' => keep, 'out' => drop.
+    Apply one filter; mode 'in' keeps matches, 'out' removes matches.
     rule = (col, op, val)
     """
     col, op, val = rule
+
     if op == '%=':
-        mask = df[col].astype(str).str.contains(val, na=False)
+        mask = df[col].astype(str).str.contains(str(val), na=False, regex=False)
+    elif op == '!%=':
+        mask = ~df[col].astype(str).str.contains(str(val), na=False, regex=False)
+    elif op == '^=':
+        mask = df[col].astype(str).str.startswith(str(val), na=False)
+    elif op == '=^':
+        mask = df[col].astype(str).str.endswith(str(val), na=False)
     elif op == '==':
         mask = df[col] == val
+    elif op == '!=':
+        mask = df[col] != val
     elif op == '>=':
-        mask = pd.to_numeric(df[col], errors='coerce') >= val
+        mask = pd.to_numeric(df[col], errors='coerce') >= float(val)
     elif op == '<=':
-        mask = pd.to_numeric(df[col], errors='coerce') <= val
+        mask = pd.to_numeric(df[col], errors='coerce') <= float(val)
     elif op == '>':
-        mask = pd.to_numeric(df[col], errors='coerce') > val
+        mask = pd.to_numeric(df[col], errors='coerce') > float(val)
     elif op == '<':
-        mask = pd.to_numeric(df[col], errors='coerce') < val
+        mask = pd.to_numeric(df[col], errors='coerce') < float(val)
     elif op == 'isalpha':
         mask = df[col].astype(str).str.contains(r'[A-Za-z]', na=False)
     elif op == 'isdigit':
         mask = df[col].astype(str).str.contains(r'[0-9]', na=False)
     elif op == 'isspecial':
         mask = df[col].astype(str).str.contains(r'[^A-Za-z0-9\s]', na=False)
+    elif op == 'isempty':
+        s = df[col].astype(str).str.strip()
+        mask = s.eq("") | df[col].isna()
+    elif op == 'isnotempty':
+        s = df[col].astype(str).str.strip()
+        mask = (~s.eq("")) & (~df[col].isna())
     else:
         raise ValueError("Unsupported operator")
 
     return df[mask] if mode == 'in' else df[~mask]
 
-# ───────────────────────────── main flow ───────────────────────────
-def main():
-    console.print("[bold cyan]CSV Filter Tool[/bold cyan]")
+# ─────────────────────────── main flow ───────────────────────────
 
-    # 1️⃣  folder & file
+def main():
+    console.print("[bold cyan]CSV/Excel Filter Tool[/bold cyan]")
+
+    # 1) folder & file
     folder = ask_directory()
-    path   = select_csv_file(folder)
+    path, sheet = select_table_file(folder)
     if not path:
         return
-    df = read_csv_safely(path)
+    df = read_table_safely(path, sheet)
     if df is None:
         return
 
-    # 2️⃣  choose filter-in or filter-out default
+    # 2) choose filter-in or filter-out default
     mode = questionary.select(
         "Default behaviour for each filter?",
         choices=[
-        Choice("Keep rows that MATCH filter (filter-IN)", value="in"),
-        Choice("Remove rows that MATCH filter (filter-OUT)", value="out")
+            Choice("Keep rows that MATCH filter (filter-IN)", value="in"),
+            Choice("Remove rows that MATCH filter (filter-OUT)", value="out")
         ]
     ).ask()
 
+    # 3) iterative filtering
     working_df = df.copy()
     while True:
         try:
             rules = build_filters(working_df)
         except ValueError as e:
             console.print(f"[bold red]{e}[/bold red]")
+            if not questionary.confirm("Try entering filters again?", default=True).ask():
+                break
             continue
 
+        # simulate
         simulated_df = working_df.copy()
         for rule in rules:
             simulated_df = apply_filter(simulated_df, rule, mode)
 
         console.print(f"[yellow]Filter preview:[/yellow] Would keep {len(simulated_df)} out of {len(working_df)} rows")
-
         if len(simulated_df) == 0:
             console.print("[red]No rows would be left after applying this filter – skipping.[/red]")
         elif questionary.confirm("Apply this filter?", default=True).ask():
@@ -205,8 +264,7 @@ def main():
         if not questionary.confirm("Add another filter?", default=False).ask():
             break
 
-
-    # 5️⃣ export
+    # 4) export
     if questionary.confirm("Export the final result?", default=True).ask():
         fmt = questionary.select("Choose format:", choices=["CSV", "XLSX"]).ask()
         fname = questionary.text("File name (without extension):").ask()
