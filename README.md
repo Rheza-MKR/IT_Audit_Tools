@@ -74,3 +74,6 @@ docker compose down   # Stops containers
 docker system prune   # Frees unused Docker space (optional)
 ```
 
+## Author
+- Eliza Lesmana
+- Rheza Agung
