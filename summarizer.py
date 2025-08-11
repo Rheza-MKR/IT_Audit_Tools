@@ -136,30 +136,43 @@ def _print_numeric_insights(df: pd.DataFrame):
         else:
             console.print("[italic]No non-zero values for min list.[/italic]")
 
-def _coerce_datetimes_for_info(df: pd.DataFrame) -> list[str]:
+def _coerce_datetimes_for_info(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
     Try to detect datetime-like columns (lightweight).
     We attempt conversion for object columns; if >70% parseable, treat as datetime.
+    Returns (parsed_df, date_cols).
     """
-    date_cols = []
-    for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
+    parsed_df = df.copy()
+    date_cols: list[str] = []
+
+    for col in parsed_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(parsed_df[col]):
             date_cols.append(col)
-        elif pd.api.types.is_object_dtype(df[col]):
-            parsed = pd.to_datetime(df[col], errors="coerce", infer_datetime_format=True)
-            ratio = parsed.notna().mean()
-            if ratio >= 0.7:
-                df[col] = parsed
+            continue
+
+        if pd.api.types.is_object_dtype(parsed_df[col]):
+            try:
+                # Use mixed format parsing to avoid per-element warnings
+                parsed = pd.to_datetime(parsed_df[col], errors="coerce", format="mixed")
+            except TypeError:
+                # For older pandas versions without format="mixed"
+                parsed = pd.to_datetime(parsed_df[col], errors="coerce")
+
+            if parsed.notna().mean() >= 0.70:
+                parsed_df[col] = parsed
                 date_cols.append(col)
-    return date_cols
+
+    return parsed_df, date_cols
+
 
 def _print_date_ranges(df: pd.DataFrame):
-    date_cols = _coerce_datetimes_for_info(df.copy())
-    if len(date_cols) == 0:
+    parsed_df, date_cols = _coerce_datetimes_for_info(df)
+    if not date_cols:
         return
+
     console.print("\n[bold cyan]📅 Date Ranges[/bold cyan]")
     for col in date_cols:
-        console.print(f"{col}: {df[col].min()} → {df[col].max()}")
+        console.print(f"{col}: {parsed_df[col].min()} → {parsed_df[col].max()}")
 
 def _top_frequencies(df: pd.DataFrame) -> dict[str, pd.Series]:
     """Return a dict of value_counts for all columns."""

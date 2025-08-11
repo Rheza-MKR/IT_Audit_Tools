@@ -2,14 +2,17 @@ import os
 from pathlib import Path
 import pandas as pd
 import questionary
+from questionary import Choice
 from rich.console import Console
 
 console = Console()
 
 
+# ───────────────────────────── File helpers ─────────────────────────────
+
 def ask_directory() -> Path:
     while True:
-        p = Path(questionary.path("📂  Enter folder containing CSV files:").ask()).expanduser()
+        p = Path(questionary.path("📂  Enter folder containing CSV/Excel files:").ask()).expanduser().resolve()
         if p.is_dir():
             return p
         console.print(f"[bold red]Directory '{p}' not found – try again.[/bold red]")
@@ -20,7 +23,7 @@ def list_data_files(folder: Path):
     return [f.name for f in folder.glob("*") if f.suffix.lower() in (".csv", ".xlsx", ".xls")]
 
 
-def select_multiple_csv_files(folder: Path):
+def select_multiple_data_files(folder: Path):
     files = list_data_files(folder)
     if not files:
         console.print("[bold red]No Excel/CSV files in that folder.[/bold red]")
@@ -32,9 +35,10 @@ def select_multiple_csv_files(folder: Path):
 def read_file_safely(path: Path) -> pd.DataFrame | None:
     """Read CSV or Excel safely with multiple fallbacks."""
     try:
-        if path.suffix.lower() in (".xlsx", ".xls"):
+        ext = path.suffix.lower()
+        if ext in (".xlsx", ".xls"):
             return pd.read_excel(path)
-        elif path.suffix.lower() == ".csv":
+        elif ext == ".csv":
             # Try multiple read_csv configs
             for kwargs in (dict(), dict(sep=";"), dict(encoding="latin-1")):
                 try:
@@ -49,71 +53,170 @@ def read_file_safely(path: Path) -> pd.DataFrame | None:
         return None
 
 
-def append_unique_rows(folder: Path, files: list[str], unique_columns: list[str]):
-    base_df = read_file_safely(folder / files[0])
-    if base_df is None:
+# ───────────────────────────── Schema alignment ─────────────────────────────
+
+def inspect_columns(dfs: dict[str, pd.DataFrame]) -> tuple[set, set, dict[str, set]]:
+    """Return union, intersection, and per-file columns."""
+    per_file = {name: set(df.columns) for name, df in dfs.items()}
+    all_cols = set().union(*per_file.values())
+    common_cols = set.intersection(*per_file.values()) if per_file else set()
+    return all_cols, common_cols, per_file
+
+
+def choose_alignment_mode(all_cols: set, common_cols: set, first_cols: list[str]) -> tuple[str, list[str]]:
+    """
+    Ask how to align columns:
+      - union
+      - intersection
+      - first
+      - manual (pick from union)
+    Returns (mode, selected_columns)
+    """
+    console.print("\n[bold cyan]Column alignment options:[/bold cyan]")
+    console.print(f"- Union (force append): {len(all_cols)} columns")
+    console.print(f"- Intersection (common to all): {len(common_cols)} columns")
+    console.print(f"- Match first file’s columns: {len(first_cols)} columns")
+
+    mode = questionary.select(
+        "How do you want to align the columns across files?",
+        choices=[
+            Choice("Force append (use union of all columns)", value="union"),
+            Choice("Only common columns (intersection)", value="intersection"),
+            Choice("Match first file’s columns", value="first"),
+            Choice("Choose columns manually from union", value="manual"),
+        ],
+    ).ask()
+
+    if mode == "union":
+        return mode, sorted(all_cols)
+    if mode == "intersection":
+        return mode, sorted(common_cols)
+    if mode == "first":
+        return mode, list(first_cols)
+
+    # manual
+    pick = questionary.checkbox(
+        "Select the columns to use (from union):",
+        choices=sorted(all_cols)
+    ).ask()
+    return "manual", pick
+
+
+def align_dataframes(dfs: dict[str, pd.DataFrame], selected_cols: list[str]) -> dict[str, pd.DataFrame]:
+    """
+    Reindex/expand each df to selected_cols.
+    Missing columns are added with NaN; extra columns are dropped.
+    """
+    aligned = {}
+    for name, df in dfs.items():
+        # Add missing columns as NaN
+        for c in selected_cols:
+            if c not in df.columns:
+                df[c] = pd.NA
+        aligned[name] = df[selected_cols].copy()
+    return aligned
+
+
+# ───────────────────────────── Append logic ─────────────────────────────
+
+def export_table(df: pd.DataFrame, folder: Path, default_name: str):
+    if df is None or df.empty:
+        console.print("[bold yellow]No data to export.[/bold yellow]")
+        return
+    if not questionary.confirm("Do you want to export this table?", default=True).ask():
+        return
+    fmt = questionary.select("Choose format:", choices=["CSV", "XLSX"]).ask()
+    name = questionary.text("File name (without extension):", default=default_name).ask()
+    out_path = folder / f"{name}.{fmt.lower()}"
+    try:
+        if fmt == "CSV":
+            df.to_csv(out_path, index=False)
+        else:
+            df.to_excel(out_path, index=False)
+        console.print(f"[bold green]✅ Saved → {out_path}[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Failed to save: {e}[/bold red]")
+
+
+def append_with_schema_resolution(folder: Path, files: list[str]):
+    # Read all files first
+    loaded: dict[str, pd.DataFrame] = {}
+    for f in files:
+        df = read_file_safely(folder / f)
+        if df is None:
+            console.print(f"[bold red]Skipping unreadable file: {f}[/bold red]")
+            continue
+        loaded[f] = df
+
+    if len(loaded) < 2:
+        console.print("[bold red]Need at least two readable files to append.[/bold red]")
         return
 
-    base_df = base_df.drop_duplicates(subset=unique_columns)
+    # Show a tiny peek for context
+    console.print("\n[bold blue]Preview (first 5 rows) of first file:[/bold blue]")
+    console.print(loaded[files[0]].head())
 
-    for i in range(1, len(files)):
-        next_df = read_file_safely(folder / files[i])
-        if next_df is None:
+    # Decide schema
+    all_cols, common_cols, per_file_cols = inspect_columns(loaded)
+    mode, selected_cols = choose_alignment_mode(all_cols, common_cols, list(loaded[files[0]].columns))
+
+    if not selected_cols:
+        console.print("[bold red]No columns selected; aborting.[/bold red]")
+        return
+
+    # Align all dataframes to the chosen schema
+    aligned = align_dataframes(loaded, selected_cols)
+
+    # Ask for unique columns (must be subset of selected_cols)
+    while True:
+        unique_columns = questionary.checkbox(
+            "🔑 Select column(s) to define uniqueness:",
+            choices=selected_cols
+        ).ask()
+        if not unique_columns:
+            console.print("[red]❌ You must select at least one unique column.[/red]")
             continue
+        # Ok if selected
+        break
 
-        if set(base_df.columns) != set(next_df.columns):
-            console.print(f"[bold red]Column mismatch. Skipping {files[i]}.[/bold red]")
-            continue
+    # Start with the first file as base
+    ordered_names = [f for f in files if f in aligned]  # preserve user selection order
+    base = aligned[ordered_names[0]].drop_duplicates(subset=unique_columns)
 
-        combined = pd.concat([base_df, next_df], ignore_index=True)
-        duplicated = combined[combined.duplicated(subset=unique_columns, keep=False)]
+    # Append loop
+    for name in ordered_names[1:]:
+        next_df = aligned[name]
+        combined = pd.concat([base, next_df], ignore_index=True)
 
-        if not duplicated.empty:
-            console.print(f"[bold yellow]⚠️  Found {len(duplicated)} duplicated rows from {files[i]}[/bold yellow]")
-            if questionary.confirm("Do you want to export duplicated rows?").ask():
-                fmt = questionary.select("Choose format:", choices=["CSV", "XLSX"]).ask()
-                name = questionary.text("Enter file name (without extension):").ask()
-                out_path = folder / f"{name}.{fmt.lower()}"
-                if fmt == "CSV":
-                    duplicated.to_csv(out_path, index=False)
-                else:
-                    duplicated.to_excel(out_path, index=False)
-                console.print(f"[green]✅ Exported duplicated rows → {out_path}[/green]")
+        # Duplicated rows w.r.t unique columns
+        dup_mask = combined.duplicated(subset=unique_columns, keep=False)
+        duplicated_rows = combined[dup_mask]
 
-        base_df = pd.concat([base_df, next_df]).drop_duplicates(subset=unique_columns)
+        if not duplicated_rows.empty:
+            console.print(f"[bold yellow]⚠️  Found {len(duplicated_rows)} duplicated rows when appending {name}[/bold yellow]")
+            if questionary.confirm("Do you want to export duplicated rows?", default=False).ask():
+                export_table(duplicated_rows, folder, default_name=f"duplicates_from_{Path(name).stem}")
 
-    console.print(f"[bold green]✅ Appending done. Final row count: {len(base_df)}[/bold green]")
+        # Keep unique
+        base = combined.drop_duplicates(subset=unique_columns, keep="first")
 
-    if questionary.confirm("Do you want to export the final combined table?").ask():
-        fmt = questionary.select("Choose format:", choices=["CSV", "XLSX"]).ask()
-        name = questionary.text("File name (without extension):").ask()
-        out_path = folder / f"{name}.{fmt.lower()}"
-        if fmt == "CSV":
-            base_df.to_csv(out_path, index=False)
-        else:
-            base_df.to_excel(out_path, index=False)
-        console.print(f"[bold green]✅ Final combined file saved → {out_path}[/bold green]")
+    console.print(f"[bold green]✅ Appending done. Final row count: {len(base)}[/bold green]")
 
+    export_table(base, folder, default_name="appended")
+
+
+# ───────────────────────────── Entrypoint ─────────────────────────────
 
 def main():
-    console.print("[bold cyan]CSV Append Unique Rows Tool[/bold cyan]")
+    console.print("[bold cyan]Append Tables (Schema‑Aware)[/bold cyan]")
 
     folder = ask_directory()
-    files = select_multiple_csv_files(folder)
+    files = select_multiple_data_files(folder)
     if not files:
-        console.print("[red]Please select at least two CSV files.[/red]")
+        console.print("[red]Please select at least two files.[/red]")
         return
 
-    sample_df = read_file_safely(folder / files[0])
-    if sample_df is None:
-        return
-
-    unique_columns = questionary.checkbox("🔑 Select column(s) to define uniqueness:", choices=list(sample_df.columns)).ask()
-    if not unique_columns:
-        console.print("[red]❌ You must select at least one unique column.[/red]")
-        return
-
-    append_unique_rows(folder, files, unique_columns)
+    append_with_schema_resolution(folder, files)
 
 
 if __name__ == "__main__":
