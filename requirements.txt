@@ -25,3 +25,4 @@ tzdata==2025.1
 wcwidth==0.2.13
 xmod==1.8.1
 xlsxWriter==3.2.0
+openpyxl==3.1.2
