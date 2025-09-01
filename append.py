@@ -4,9 +4,9 @@ import pandas as pd
 import questionary
 from questionary import Choice
 from rich.console import Console
+from utils.import_utils import read_file_safely
 
 console = Console()
-
 
 # ───────────────────────────── File helpers ─────────────────────────────
 
@@ -31,26 +31,6 @@ def select_multiple_data_files(folder: Path):
     choices = questionary.checkbox("✅ Select files to append:", choices=files).ask()
     return choices if choices and len(choices) >= 2 else None
 
-
-def read_file_safely(path: Path) -> pd.DataFrame | None:
-    """Read CSV or Excel safely with multiple fallbacks."""
-    try:
-        ext = path.suffix.lower()
-        if ext in (".xlsx", ".xls"):
-            return pd.read_excel(path)
-        elif ext == ".csv":
-            # Try multiple read_csv configs
-            for kwargs in (dict(), dict(sep=";"), dict(encoding="latin-1")):
-                try:
-                    return pd.read_csv(path, on_bad_lines="skip", low_memory=False, **kwargs)
-                except Exception:
-                    continue
-        else:
-            console.print(f"[bold red]❌ Unsupported file format: {path.suffix}[/bold red]")
-            return None
-    except Exception as e:
-        console.print(f"[bold red]❌ Could not open {path.name}: {e}[/bold red]")
-        return None
 
 
 # ───────────────────────────── Schema alignment ─────────────────────────────

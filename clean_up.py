@@ -4,30 +4,12 @@ from pathlib import Path
 import questionary
 from rich.console import Console
 import os
+from utils.import_utils import read_file_safely
+
 
 console = Console()
 
 # === FILE HANDLING ===
-
-def read_file_safely(path: Path):
-    """Read CSV or Excel file with multiple fallbacks."""
-    try:
-        if path.suffix.lower() in (".xlsx", ".xls"):
-            return pd.read_excel(path)
-        elif path.suffix.lower() == ".csv":
-            try:
-                df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
-                if len(df.columns) == 1:  # maybe wrong delimiter
-                    df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
-                return df
-            except Exception:
-                return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
-        else:
-            console.print(f"[bold red]Unsupported file format: {path.suffix}[/bold red]")
-            return None
-    except Exception as e:
-        console.print(f"[bold red]Error reading file: {e}[/bold red]")
-        return None
 
 def _ask_directory():
     while True:

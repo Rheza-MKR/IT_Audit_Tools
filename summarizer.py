@@ -5,31 +5,17 @@ from pathlib import Path
 import questionary
 import os
 
+# ✅ Use the shared safe reader (handles CSV + Excel, sheet pick, header detect)
+from utils.import_utils import read_file_safely
+
 console = Console()
 
 # ───────────────────────── file helpers ─────────────────────────
 
-def read_table_safely(path: Path) -> pd.DataFrame | None:
-    """Read CSV or Excel with simple fallbacks."""
-    try:
-        suf = path.suffix.lower()
-        if suf in (".xlsx", ".xls"):
-            return pd.read_excel(path)
-        # CSV branch
-        try:
-            df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
-            if len(df.columns) == 1:
-                df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
-            return df
-        except Exception:
-            return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
-    except Exception as e:
-        console.print(f"[bold red]Error reading file: {e}[/bold red]")
-        return None
-
 def _ask_directory() -> Path:
     """Loop until the user enters an existing directory path."""
     while True:
+        # You can switch to questionary.path if you prefer a filepicker-style prompt
         dir_path = Path(questionary.text("Enter the audit directory path:").ask()).expanduser()
         if dir_path.is_dir():
             return dir_path
@@ -59,8 +45,9 @@ def _print_basic_overview(df: pd.DataFrame):
         console.print(f" - {col}: {status}")
 
 def _maybe_pick_primary_key_and_report(df: pd.DataFrame):
+    choices = list(map(str, df.columns)) + ["None"]
     pk_column = questionary.select(
-        "Select the primary key column (or None):", choices=list(df.columns) + ["None"]
+        "Select the primary key column (or None):", choices=choices
     ).ask()
     if pk_column == "None":
         return
@@ -77,11 +64,24 @@ def _maybe_pick_primary_key_and_report(df: pd.DataFrame):
         console.print("[bold green]✅ No duplicate primary keys[/bold green]")
 
 def _print_numeric_insights(df: pd.DataFrame):
-    num_cols = df.select_dtypes(include="number").columns
-    if len(num_cols) == 0:
-        return
+    import numpy as np
+    from rich.table import Table
+
+    # Coerce every column to numeric (objects like "123" become numbers; non-numeric -> NaN)
+    coerced: dict[str, pd.Series] = {}
+    numeric_cols: list[str] = []
+    for col in df.columns:
+        s = pd.to_numeric(df[col], errors="coerce")
+        s = s.replace([np.inf, -np.inf], np.nan)
+        if s.notna().any():           # keep only columns with at least one numeric value
+            coerced[col] = s
+            numeric_cols.append(col)
 
     console.print("\n[bold cyan]📈 Numeric Column Statistics (overview)[/bold cyan]")
+    if not numeric_cols:
+        console.print("[italic]No numeric-like columns with values.[/italic]")
+        return
+
     stats_table = Table(show_header=True, header_style="bold magenta")
     stats_table.add_column("Column")
     stats_table.add_column("Mean")
@@ -90,51 +90,54 @@ def _print_numeric_insights(df: pd.DataFrame):
     stats_table.add_column("Max")
     stats_table.add_column("Sum")
 
-    for col in num_cols:
-        stats_table.add_row(
-            col,
-            f"{df[col].mean():.2f}",
-            f"{df[col].median():.2f}",
-            f"{df[col].min():.2f}",
-            f"{df[col].max():.2f}",
-            f"{df[col].sum():.2f}",
-        )
+    for col in numeric_cols:
+        s = coerced[col].dropna()
+        if s.empty:
+            mean = median = min_ = max_ = sum_ = "—"
+        else:
+            mean   = f"{s.mean():.2f}"
+            median = f"{s.median():.2f}"
+            min_   = f"{s.min():.2f}"
+            max_   = f"{s.max():.2f}"
+            sum_   = f"{s.sum():.2f}"
+        stats_table.add_row(col, mean, median, min_, max_, sum_)
+
     console.print(stats_table)
 
-    # Ask how to treat zeros for "smallest" slice
+    # Ask how to treat zeros for "smallest" slice (only if we had any numeric columns)
     exclude_zeros = questionary.confirm(
         "For 'smallest values' lists, exclude zeros?", default=True
     ).ask()
 
-    # Top max/min per numeric column
     console.print("\n[bold cyan]🔎 Extremes per numeric column[/bold cyan]")
-    for col in num_cols:
-        s = df[col].dropna()
-        if exclude_zeros:
-            s_min = s[s != 0]
-        else:
-            s_min = s
+    for col in numeric_cols:
+        s = coerced[col].dropna()
+        if s.empty:
+            continue
 
+        s_min = s[s != 0] if exclude_zeros else s
         top_max = s.sort_values(ascending=False).head(10)
         top_min = s_min.sort_values(ascending=True).head(10)
 
         console.print(f"\n[bold]{col}[/bold]")
-        # Max 10
+
         table_max = Table(title="Top 10 Max", show_header=True, header_style="bold magenta")
         table_max.add_column("Value"); table_max.add_column("Row Index")
         for idx, val in top_max.items():
             table_max.add_row(f"{val}", str(idx))
         console.print(table_max)
 
-        # Min 10
         if not top_min.empty:
-            table_min = Table(title=f"Top 10 Min{' (non-zero)' if exclude_zeros else ''}", show_header=True, header_style="bold magenta")
+            table_min = Table(
+                title=f"Top 10 Min{' (non-zero)' if exclude_zeros else ''}",
+                show_header=True, header_style="bold magenta"
+            )
             table_min.add_column("Value"); table_min.add_column("Row Index")
             for idx, val in top_min.items():
                 table_min.add_row(f"{val}", str(idx))
             console.print(table_min)
         else:
-            console.print("[italic]No non-zero values for min list.[/italic]")
+            console.print("[italic]No values to display for minimums.[/italic]")
 
 def _coerce_datetimes_for_info(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
@@ -152,10 +155,8 @@ def _coerce_datetimes_for_info(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
 
         if pd.api.types.is_object_dtype(parsed_df[col]):
             try:
-                # Use mixed format parsing to avoid per-element warnings
                 parsed = pd.to_datetime(parsed_df[col], errors="coerce", format="mixed")
             except TypeError:
-                # For older pandas versions without format="mixed"
                 parsed = pd.to_datetime(parsed_df[col], errors="coerce")
 
             if parsed.notna().mean() >= 0.70:
@@ -163,7 +164,6 @@ def _coerce_datetimes_for_info(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str
                 date_cols.append(col)
 
     return parsed_df, date_cols
-
 
 def _print_date_ranges(df: pd.DataFrame):
     parsed_df, date_cols = _coerce_datetimes_for_info(df)
@@ -238,8 +238,13 @@ def _export_frequencies(freq_map: dict[str, pd.Series], src_path: Path, dir_path
 # ───────────────────────── entrypoint ─────────────────────────
 
 def summarize_file(path: Path, base_dir: Path):
-    df = read_table_safely(path)
+    # ✅ Use the shared safe reader here (handles CSV/Excel, sheet/header prompts inside)
+    df = read_file_safely(path)
     if df is None:
+        console.print(f"[bold red]Unable to load {path.name}.[/bold red]")
+        return
+    if df.empty:
+        console.print(f"[bold yellow]{path.name} loaded but contains 0 rows.[/bold yellow]")
         return
 
     # 1) Overview + missing + PK checks

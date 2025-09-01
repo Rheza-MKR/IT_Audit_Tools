@@ -17,12 +17,12 @@ from questionary import Choice
 from rich.console import Console
 from rich.table import Table
 from difflib import get_close_matches
+from utils.import_utils import read_file_safely
 
 console = Console()
 
 # ───────────────────────── config ─────────────────────────
 
-# Operator -> human hint
 OPERATORS = {
     '%=':  'contains',
     '!%=': 'does NOT contain',
@@ -36,7 +36,6 @@ OPERATORS = {
     '<':   '<',
 }
 
-# Special "operators" (keyword at end of expression)
 SPECIAL_FILTERS = {
     'isalpha':    "column contains letters [A–Z]",
     'isdigit':    "column contains digits [0–9]",
@@ -45,7 +44,6 @@ SPECIAL_FILTERS = {
     'isnotempty': "column is not empty",
 }
 
-# Parse priority (longest first so we don't misread '!=' as '!')
 OP_PARSE_ORDER = ['!%=', '>=', '<=', '!=', '%=', '^=', '=^', '==', '>', '<']
 
 # ─────────────────────── file helpers ──────────────────────
@@ -60,41 +58,16 @@ def ask_directory() -> Path:
 def list_table_files(folder: Path):
     return sorted([f.name for f in folder.iterdir() if f.suffix.lower() in {'.csv', '.xlsx', '.xls'}])
 
-def select_table_file(folder: Path) -> tuple[Path, str | None]:
+def select_table_file(folder: Path) -> Path | None:
+    """Return only the Path. Sheet selection is handled inside read_file_safely."""
     files = list_table_files(folder)
     if not files:
         console.print("[bold red]No CSV or Excel files in that folder.[/bold red]")
-        return None, None
+        return None
     pick = questionary.select("Select a file:", choices=files + ["<Back>"]).ask()
     if pick == "<Back>":
-        return None, None
-    path = folder / pick
-    sheet = None
-    if path.suffix.lower() in {'.xlsx', '.xls'}:
-        try:
-            xl = pd.ExcelFile(path)
-            if len(xl.sheet_names) > 1:
-                sheet = questionary.select("Select sheet:", choices=xl.sheet_names).ask()
-        except Exception as e:
-            console.print(f"[bold red]Failed reading Excel: {e}[/bold red]")
-            return None, None
-    return path, sheet
-
-def read_table_safely(path: Path, sheet: str | None) -> pd.DataFrame | None:
-    try:
-        if path.suffix.lower() in {'.xlsx', '.xls'}:
-            return pd.read_excel(path, sheet_name=sheet) if sheet else pd.read_excel(path)
-        # CSV
-        try:
-            df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
-            if len(df.columns) == 1:
-                df = pd.read_csv(path, encoding="utf-8", sep=";", on_bad_lines="skip")
-            return df
-        except Exception:
-            return pd.read_csv(path, encoding="latin-1", on_bad_lines="skip")
-    except Exception as e:
-        console.print(f"[bold red]❌  Could not open {path.name}: {e}[/bold red]")
         return None
+    return folder / pick
 
 def show_dataframe(df: pd.DataFrame, max_rows: int = 10):
     table = Table(show_header=True, header_style="bold magenta")
@@ -111,10 +84,6 @@ def find_similar(col: str, options) -> str | None:
 # ────────────────────── filter building ─────────────────────
 
 def build_filters(df: pd.DataFrame) -> list[tuple[str, str, str | float | None]]:
-    """
-    Return list of filter rules: (column, operator|special, value_or_None).
-    Accepts multiple rules separated by commas in one input.
-    """
     console.print("\n[bold yellow]Columns:[/bold yellow] " + ", ".join(map(str, df.columns)))
     console.print("[italic]Operators:[/italic]  " +
                   ", ".join(f"{k} ({v})" for k, v in OPERATORS.items()))
@@ -129,7 +98,6 @@ def build_filters(df: pd.DataFrame) -> list[tuple[str, str, str | float | None]]
 
     rules = []
     for raw in [x.strip() for x in raw_input.split(",") if x.strip()]:
-        # special keyword?
         found_special = False
         for keyword in SPECIAL_FILTERS:
             if raw.endswith(keyword):
@@ -139,7 +107,6 @@ def build_filters(df: pd.DataFrame) -> list[tuple[str, str, str | float | None]]
                 found_special = True
                 break
         if not found_special:
-            # normal operator
             op = None
             for cand in OP_PARSE_ORDER:
                 if cand in raw:
@@ -156,7 +123,6 @@ def build_filters(df: pd.DataFrame) -> list[tuple[str, str, str | float | None]]
             else:
                 raise ValueError(f"Unknown column: {col}")
 
-        # numeric coercion when appropriate
         if (op not in SPECIAL_FILTERS) and (op not in {'%=', '!%=', '^=', '=^'}):
             if pd.api.types.is_numeric_dtype(df[col]):
                 try:
@@ -167,10 +133,6 @@ def build_filters(df: pd.DataFrame) -> list[tuple[str, str, str | float | None]]
     return rules
 
 def apply_filter(df: pd.DataFrame, rule, mode: str) -> pd.DataFrame:
-    """
-    Apply one filter; mode 'in' keeps matches, 'out' removes matches.
-    rule = (col, op, val)
-    """
     col, op, val = rule
 
     if op == '%=':
@@ -217,10 +179,11 @@ def main():
 
     # 1) folder & file
     folder = ask_directory()
-    path, sheet = select_table_file(folder)
+    path = select_table_file(folder)
     if not path:
         return
-    df = read_table_safely(path, sheet)
+
+    df = read_file_safely(path)
     if df is None:
         return
 
@@ -239,12 +202,11 @@ def main():
         try:
             rules = build_filters(working_df)
         except ValueError as e:
-            console.print(f"[bold red]{e}[/bold red]")
+            console.print(f("[bold red]{e}[/bold red]"))
             if not questionary.confirm("Try entering filters again?", default=True).ask():
                 break
             continue
 
-        # simulate
         simulated_df = working_df.copy()
         for rule in rules:
             simulated_df = apply_filter(simulated_df, rule, mode)
