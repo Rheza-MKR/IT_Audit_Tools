@@ -3,6 +3,7 @@
 Full Reconciliation Tool
 ────────────────────────────────────────────────────────────
 Flow:
+0) Choose matching mode: Normal join vs One-to-one mapping
 1) Pick a folder
 2) Pick MAIN file → fully load it via read_file_safely (Excel sheet/header handled here)
 3) Pick REFERENCE file → fully load via read_file_safely
@@ -19,7 +20,7 @@ import questionary
 from rich.console import Console
 
 # ✅ Only use your shared helpers; read_file_safely can call find_headers internally
-from utils.import_utils import read_file_safely, find_headers  # noqa: F401 (imported for clarity)
+from utils.import_utils import read_file_safely, find_headers  # noqa: F401
 
 console = Console()
 
@@ -55,6 +56,17 @@ def select_column(df: pd.DataFrame, prompt: str) -> Optional[str]:
         return None
     return choice
 
+def select_match_mode() -> Optional[str]:
+    return questionary.select(
+        "Choose matching mode:",
+        choices=[
+            "Normal join (presence-based)",
+            "One-to-one mapping (multiset)",
+            "<Back>",
+        ],
+        default="Normal join (presence-based)"
+    ).ask()
+
 # ───────────────────────── Recon logic ─────────────────────────
 
 def check_data_format(df: pd.DataFrame, column: str) -> List[str]:
@@ -64,14 +76,11 @@ def check_data_format(df: pd.DataFrame, column: str) -> List[str]:
     errs: List[str] = []
     if column not in df.columns:
         return [f"Column '{column}' not found."]
-    # check missing BEFORE coercing to str
     if df[column].isna().any():
         errs.append("Missing values detected.")
     s = df[column].astype(str).str.strip()
-    # special characters (non word/space)
     if s.str.contains(r"[^\w\s]", regex=True, na=False).any():
         errs.append("Special characters detected.")
-    # numeric & negatives
     numeric_mask = s.str.replace(".", "", 1, regex=False).str.isnumeric()
     if numeric_mask.all() and len(s) > 0:
         try:
@@ -124,75 +133,109 @@ def export_df(df: pd.DataFrame, out_path: Path) -> bool:
         console.print(f"[bold red]Error saving: {e}[/bold red]")
         return False
 
-def reconcile_on_keys(
-    df1: pd.DataFrame,
-    df2: pd.DataFrame,
-    key1: str,
-    key2: str,
-    method: str,
-    num_chars: Optional[int],
+def _prepare_keys(
+    df1: pd.DataFrame, df2: pd.DataFrame, key1: str, key2: str, method: str, num_chars: Optional[int]
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Return (matched_df1_rows, unmatched_df1_rows) after transforming keys based on method.
+    Copy and normalize key columns according to the chosen method.
     """
-    # Normalize keys
-    df1 = df1.copy()
-    df2 = df2.copy()
-    df1[key1] = df1[key1].astype(str).str.strip()
-    df2[key2] = df2[key2].astype(str).str.strip()
+    a = df1.copy()
+    b = df2.copy()
+    a[key1] = a[key1].astype(str).str.strip()
+    b[key2] = b[key2].astype(str).str.strip()
 
     if method == "First N characters":
-        df1[key1] = df1[key1].str[:num_chars]
-        df2[key2] = df2[key2].str[:num_chars]
+        a[key1] = a[key1].str[:num_chars]
+        b[key2] = b[key2].str[:num_chars]
     elif method == "Last N characters":
-        df1[key1] = df1[key1].str[-num_chars:]
-        df2[key2] = df2[key2].str[-num_chars:]
+        a[key1] = a[key1].str[-num_chars:]
+        b[key2] = b[key2].str[-num_chars:]
 
-    key2_set = set(df2[key2])
-    matched_mask = df1[key1].isin(key2_set)
-    return df1[matched_mask].copy(), df1[~matched_mask].copy()
+    return a, b
+
+def reconcile_presence(
+    df1: pd.DataFrame, df2: pd.DataFrame, key1: str, key2: str, method: str, num_chars: Optional[int]
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Normal presence-based reconciliation (any presence in df2 counts as match for all same-key rows in df1).
+    """
+    a, b = _prepare_keys(df1, df2, key1, key2, method, num_chars)
+    key2_set = set(b[key2])
+    matched_mask = a[key1].isin(key2_set)
+    return a[matched_mask].copy(), a[~matched_mask].copy()
+
+def reconcile_one_to_one(
+    df1: pd.DataFrame, df2: pd.DataFrame, key1: str, key2: str, method: str, num_chars: Optional[int]
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    One-to-one (multiset) reconciliation:
+    Each occurrence in df2 can match only one occurrence in df1 (same transformed key).
+    Extra occurrences in df1 beyond df2's count become unmatched.
+    """
+    a, b = _prepare_keys(df1, df2, key1, key2, method, num_chars)
+
+    # Remaining capacity (counts) per key from reference (df2)
+    capacity = b[key2].value_counts(dropna=False).to_dict()
+
+    # Match greedily in row order
+    matched_flags = []
+    for val in a[key1]:
+        remaining = capacity.get(val, 0)
+        if remaining > 0:
+            matched_flags.append(True)
+            capacity[val] = remaining - 1  # consume one
+        else:
+            matched_flags.append(False)
+
+    a["__matched__"] = matched_flags
+    matched = a[a["__matched__"]].drop(columns="__matched__").copy()
+    unmatched = a[~a["__matched__"]].drop(columns="__matched__").copy()
+    return matched, unmatched
 
 # ───────────────────────── Entrypoint ─────────────────────────
 
 def main():
     console.print("[bold cyan]Full Reconciliation Tool[/bold cyan]")
 
+    # 0) Choose matching mode up front
+    match_mode = select_match_mode()
+    if not match_mode or match_mode == "<Back>":
+        return
+
     # 1) Pick folder
     data_dir = ask_directory()
 
-    # 2) Pick MAIN file and fully load it (Excel handling occurs here)
+    # 2) MAIN file
     console.print("[bold]Select the main file (source to check):[/bold]")
     file1_path = select_file(data_dir, "Main file:")
     if not file1_path:
         return
-
     df1 = read_file_safely(file1_path)
     if df1 is None or df1.empty:
         console.print(f"[bold red]Failed to load data from {file1_path.name}.[/bold red]")
         return
 
-    # 3) From the LOADED df1, choose the key column (no extra reads)
+    # 3) Key from MAIN
     key1 = select_column(df1, f"Column to match in {file1_path.name}")
     if not key1:
         return
 
-    # 4) Only now pick the REFERENCE file and fully load it (Excel handling occurs here)
+    # 4) REFERENCE file
     console.print("[bold]Select the reference file (list to match against):[/bold]")
     file2_path = select_file(data_dir, "Reference file:")
     if not file2_path:
         return
-
     df2 = read_file_safely(file2_path)
     if df2 is None or df2.empty:
         console.print(f"[bold red]Failed to load data from {file2_path.name}.[/bold red]")
         return
 
-    # 5) Choose key from LOADED df2
+    # 5) Key from REFERENCE
     key2 = select_column(df2, f"Column to match in {file2_path.name}")
     if not key2:
         return
 
-    # 6) Choose reconciliation method
+    # 6) Match transformation method
     method, num_chars = select_reconcile_method()
     if method is None:
         return
@@ -209,15 +252,19 @@ def main():
         if not questionary.confirm("Continue despite data issues?", default=False).ask():
             return
 
-    # 7) Reconcile
-    matched, unmatched = reconcile_on_keys(df1, df2, key1, key2, method, num_chars)
+    # 7) Reconcile with selected mode
+    if match_mode.startswith("One-to-one"):
+        matched, unmatched = reconcile_one_to_one(df1, df2, key1, key2, method, num_chars)
+    else:
+        matched, unmatched = reconcile_presence(df1, df2, key1, key2, method, num_chars)
 
+    # 8) Summary & export
     console.print("\n[bold blue]Reconciliation Summary[/bold blue]")
+    console.print(f"Mode: [bold]{match_mode}[/bold]   Method: [bold]{method}{'' if not num_chars else f' ({num_chars})'}[/bold]")
     console.print(f"Records in {file1_path.name}: [bold]{len(df1)}[/bold]")
     console.print(f"Matched:   [green]{len(matched)}[/green]")
     console.print(f"Unmatched: [red]{len(unmatched)}[/red]")
 
-    # 8) Export?
     if questionary.confirm("Export unmatched records?", default=True).ask():
         fmt = select_export_format()
         if fmt:

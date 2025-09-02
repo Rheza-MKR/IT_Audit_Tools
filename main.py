@@ -7,6 +7,7 @@ import summarizer
 import anomalies
 import append
 import clean_up
+import credit_debit_splitter
 
 def display_banner():
     title = figlet_format("IT Audit Tools")
@@ -17,7 +18,7 @@ def main_menu():
         inquirer.List(
             "choice",
             message="Select an option:",
-            choices=["Anomaly Detection", "Interactive Filter", "Reconcile Data", "Append Data","Summarize Data", "Clean Up","Exit"],
+            choices=["Anomaly Detection", "Interactive Filter", "Reconcile Data", "Append Data","Summarize Data", "Clean Up","Credit/Debit Splitter","Exit"],
         )
     ]
     answer = inquirer.prompt(questions)
@@ -39,6 +40,8 @@ def main():
             summarizer.main()
         elif choice == "Clean Up":
             clean_up.main()
+        elif choice == "Credit/Debit Splitter":
+            credit_debit_splitter.main()
         elif choice == "Exit":
             print("Exiting...")
             break
