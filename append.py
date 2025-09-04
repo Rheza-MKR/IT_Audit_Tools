@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 import pandas as pd
 import questionary
-from questionary import Choice
 from rich.console import Console
 from utils.import_utils import read_file_safely
 
@@ -17,11 +16,9 @@ def ask_directory() -> Path:
             return p
         console.print(f"[bold red]Directory '{p}' not found – try again.[/bold red]")
 
-
 def list_data_files(folder: Path):
     """List all CSV and Excel files in a folder."""
     return [f.name for f in folder.glob("*") if f.suffix.lower() in (".csv", ".xlsx", ".xls")]
-
 
 def select_multiple_data_files(folder: Path):
     files = list_data_files(folder)
@@ -31,71 +28,91 @@ def select_multiple_data_files(folder: Path):
     choices = questionary.checkbox("✅ Select files to append:", choices=files).ask()
     return choices if choices and len(choices) >= 2 else None
 
-
-
 # ───────────────────────────── Schema alignment ─────────────────────────────
 
-def inspect_columns(dfs: dict[str, pd.DataFrame]) -> tuple[set, set, dict[str, set]]:
-    """Return union, intersection, and per-file columns."""
-    per_file = {name: set(df.columns) for name, df in dfs.items()}
-    all_cols = set().union(*per_file.values())
-    common_cols = set.intersection(*per_file.values()) if per_file else set()
-    return all_cols, common_cols, per_file
+def _ordered_union_by_selection(loaded: dict[str, pd.DataFrame], ordered_names: list[str]) -> list[str]:
+    """
+    Build a union of columns preserving first-seen order across the selected files:
+    - first file's columns first, then any new columns as they appear in later files.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in ordered_names:
+        for c in loaded[name].columns:
+            if c not in seen:
+                seen.add(c)
+                result.append(c)
+    return result
 
+def inspect_columns(loaded: dict[str, pd.DataFrame], ordered_names: list[str]) -> tuple[list[str], set[str], dict[str, set[str]]]:
+    """
+    Returns:
+      - union_ordered: union of columns in first-seen order across selected files
+      - common_set: columns present in ALL selected files
+      - per_file: mapping filename -> set of columns
+    """
+    per_file = {name: set(df.columns) for name, df in loaded.items()}
+    # intersection over selected files in the given order
+    common_set = set(loaded[ordered_names[0]].columns)
+    for name in ordered_names[1:]:
+        common_set &= set(loaded[name].columns)
+    union_ordered = _ordered_union_by_selection(loaded, ordered_names)
+    return union_ordered, common_set, per_file
 
-def choose_alignment_mode(all_cols: set, common_cols: set, first_cols: list[str]) -> tuple[str, list[str]]:
+def choose_alignment_mode(union_ordered: list[str], common_set: set[str], first_cols: list[str]) -> tuple[str, list[str]]:
     """
     Ask how to align columns:
-      - union
-      - intersection
-      - first
-      - manual (pick from union)
+      - union       → first-seen union order
+      - intersection→ first file's order filtered to common
+      - first       → exactly first file's order
+      - manual      → pick from union (shown in first-seen order)
     Returns (mode, selected_columns)
     """
     console.print("\n[bold cyan]Column alignment options:[/bold cyan]")
-    console.print(f"- Union (force append): {len(all_cols)} columns")
-    console.print(f"- Intersection (common to all): {len(common_cols)} columns")
+    console.print(f"- Force append (union): {len(union_ordered)} columns (preserve first-seen order)")
+    console.print(f"- Only common columns (intersection): {len(common_set)} columns (first file's order)")
     console.print(f"- Match first file’s columns: {len(first_cols)} columns")
 
     mode = questionary.select(
         "How do you want to align the columns across files?",
         choices=[
-            Choice("Force append (use union of all columns)", value="union"),
-            Choice("Only common columns (intersection)", value="intersection"),
-            Choice("Match first file’s columns", value="first"),
-            Choice("Choose columns manually from union", value="manual"),
+            "Force append (use union of all columns)",
+            "Only common columns (intersection)",
+            "Match first file’s columns",
+            "Choose columns manually from union",
         ],
     ).ask()
 
-    if mode == "union":
-        return mode, sorted(all_cols)
-    if mode == "intersection":
-        return mode, sorted(common_cols)
-    if mode == "first":
-        return mode, list(first_cols)
+    if mode == "Force append (use union of all columns)":
+        return "union", list(union_ordered)
 
-    # manual
+    if mode == "Only common columns (intersection)":
+        # keep first file's order, filter to those present in all
+        return "intersection", [c for c in first_cols if c in common_set]
+
+    if mode == "Match first file’s columns":
+        return "first", list(first_cols)
+
+    # manual selection: present union in first-seen order (no sorting)
     pick = questionary.checkbox(
-        "Select the columns to use (from union):",
-        choices=sorted(all_cols)
+        "Select the columns to use (from union in first-seen order):",
+        choices=union_ordered
     ).ask()
     return "manual", pick
 
-
 def align_dataframes(dfs: dict[str, pd.DataFrame], selected_cols: list[str]) -> dict[str, pd.DataFrame]:
     """
-    Reindex/expand each df to selected_cols.
+    Reindex/expand each df to selected_cols (order preserved by selected_cols).
     Missing columns are added with NaN; extra columns are dropped.
     """
     aligned = {}
     for name, df in dfs.items():
-        # Add missing columns as NaN
+        # add missing columns
         for c in selected_cols:
             if c not in df.columns:
                 df[c] = pd.NA
-        aligned[name] = df[selected_cols].copy()
+        aligned[name] = df[selected_cols].copy()  # order is exactly as selected_cols
     return aligned
-
 
 # ───────────────────────────── Append logic ─────────────────────────────
 
@@ -117,9 +134,8 @@ def export_table(df: pd.DataFrame, folder: Path, default_name: str):
     except Exception as e:
         console.print(f"[bold red]Failed to save: {e}[/bold red]")
 
-
 def append_with_schema_resolution(folder: Path, files: list[str]):
-    # Read all files first
+    # Read all files first (preserve user-selected order)
     loaded: dict[str, pd.DataFrame] = {}
     for f in files:
         df = read_file_safely(folder / f)
@@ -128,42 +144,46 @@ def append_with_schema_resolution(folder: Path, files: list[str]):
             continue
         loaded[f] = df
 
-    if len(loaded) < 2:
+    ordered_names = [f for f in files if f in loaded]  # keep user’s selection order
+
+    if len(ordered_names) < 2:
         console.print("[bold red]Need at least two readable files to append.[/bold red]")
         return
 
     # Show a tiny peek for context
     console.print("\n[bold blue]Preview (first 5 rows) of first file:[/bold blue]")
-    console.print(loaded[files[0]].head())
+    console.print(loaded[ordered_names[0]].head())
 
-    # Decide schema
-    all_cols, common_cols, per_file_cols = inspect_columns(loaded)
-    mode, selected_cols = choose_alignment_mode(all_cols, common_cols, list(loaded[files[0]].columns))
+    # Decide schema (NO sorting; preserve order)
+    union_ordered, common_set, _per_file_cols = inspect_columns(loaded, ordered_names)
+    mode, selected_cols = choose_alignment_mode(
+        union_ordered=union_ordered,
+        common_set=common_set,
+        first_cols=list(loaded[ordered_names[0]].columns)
+    )
 
     if not selected_cols:
         console.print("[bold red]No columns selected; aborting.[/bold red]")
         return
 
-    # Align all dataframes to the chosen schema
+    # Align all dataframes to the chosen schema (order preserved)
     aligned = align_dataframes(loaded, selected_cols)
 
     # Ask for unique columns (must be subset of selected_cols)
     while True:
         unique_columns = questionary.checkbox(
             "🔑 Select column(s) to define uniqueness:",
-            choices=selected_cols
+            choices=selected_cols  # these are already in the final order
         ).ask()
         if not unique_columns:
             console.print("[red]❌ You must select at least one unique column.[/red]")
             continue
-        # Ok if selected
         break
 
     # Start with the first file as base
-    ordered_names = [f for f in files if f in aligned]  # preserve user selection order
     base = aligned[ordered_names[0]].drop_duplicates(subset=unique_columns)
 
-    # Append loop
+    # Append loop in the chosen order
     for name in ordered_names[1:]:
         next_df = aligned[name]
         combined = pd.concat([base, next_df], ignore_index=True)
@@ -184,11 +204,10 @@ def append_with_schema_resolution(folder: Path, files: list[str]):
 
     export_table(base, folder, default_name="appended")
 
-
 # ───────────────────────────── Entrypoint ─────────────────────────────
 
 def main():
-    console.print("[bold cyan]Append Tables (Schema‑Aware)[/bold cyan]")
+    console.print("[bold cyan]Append Tables (Schema-Aware, Order-Preserving)[/bold cyan]")
 
     folder = ask_directory()
     files = select_multiple_data_files(folder)
@@ -197,7 +216,6 @@ def main():
         return
 
     append_with_schema_resolution(folder, files)
-
 
 if __name__ == "__main__":
     main()
