@@ -207,7 +207,7 @@ def append_with_schema_resolution(folder: Path, files: list[str]):
 # ───────────────────────────── Entrypoint ─────────────────────────────
 
 def main():
-    console.print("[bold cyan]Append Tables (Schema-Aware, Order-Preserving)[/bold cyan]")
+    console.print("[bold cyan]Append Tables[/bold cyan]")
 
     folder = ask_directory()
     files = select_multiple_data_files(folder)
