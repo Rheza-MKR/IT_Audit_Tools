@@ -129,41 +129,61 @@ def _drop_unnamed_and_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _looks_like_sequential_index(s: pd.Series) -> bool:
     """
     True if s looks like a saved index column (0..N-1 or 1..N), ignoring NaNs.
-    Accepts numeric or numeric-like strings; requires no duplicates.
+    Uses safe Python int conversion instead of dtype casts.
     """
     if s is None or len(s) == 0:
         return False
-    v = pd.to_numeric(s, errors="coerce").dropna()
+
+    v = pd.to_numeric(s, errors="coerce")  # float series with NaNs
+    v = v.dropna()
     if v.empty:
         return False
-    # whole numbers only
+
+    # Must be whole numbers only (no fractions)
     if not ((v % 1) == 0).all():
         return False
-    v = v.astype("Int64").dropna()
-    # no duplicates
-    if v.duplicated().any():
+
+    # Convert to Python ints safely (avoids pandas int casting issues)
+    try:
+        ints = [int(x) for x in v.tolist()]
+    except Exception:
         return False
-    n = len(s)  # full column length (including NaNs)
-    mn, mx = int(v.min()), int(v.max())
-    setv = set(map(int, v.tolist()))
-    return (mn == 0 and mx == n - 1 and setv == set(range(0, n))) or \
-           (mn == 1 and mx == n and setv == set(range(1, n + 1)))
+
+    # No duplicates allowed
+    if len(ints) != len(set(ints)):
+        return False
+
+    n = len(s)            # full column length (including NaNs)
+    mn, mx = min(ints), max(ints)
+    setv = set(ints)
+
+    return (
+        (mn == 0 and mx == n - 1 and setv == set(range(0, n))) or
+        (mn == 1 and mx == n and setv == set(range(1, n + 1)))
+    )
 
 def _auto_drop_index_like_first_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Automatically drop the first column if it looks like a saved index OR is entirely empty.
-    (No prompt.)
+    Automatically drop the first column if it looks like a saved index OR is empty.
+    Never crash: on any error, keep the column.
     """
     if df.shape[1] == 0:
         return df
-    first_name = str(df.columns[0]).strip()
-    first_col = df.iloc[:, 0]
-    is_empty = first_col.isna().all()
-    name_indexy = (first_name == "") or re.match(r"^unnamed[:\s]*", first_name, flags=re.I) or \
-                  first_name.lower() in {"index", "idx", "row", "rows"}
-    if is_empty or name_indexy or _looks_like_sequential_index(first_col):
-        return df.iloc[:, 1:].copy()
-    return df
+    try:
+        first_name = str(df.columns[0]).strip()
+        first_col = df.iloc[:, 0]
+        is_empty = first_col.isna().all()
+        name_indexy = (
+            (first_name == "") or
+            re.match(r"^unnamed[:\s]*", first_name, flags=re.I) or
+            first_name.lower() in {"index", "idx", "row", "rows"}
+        )
+        if is_empty or name_indexy or _looks_like_sequential_index(first_col):
+            return df.iloc[:, 1:].copy()
+        return df
+    except Exception:
+        # If detection fails for any reason, keep the column
+        return df
 
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -185,25 +205,15 @@ def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ───────────────────────── main safe reader ─────────────────────────
 
 def read_file_safely(path: Path) -> pd.DataFrame | None:
-    """
-    Read CSV or Excel safely with multiple fallbacks and interactive sheet/header pick,
-    then AUTO-clean columns:
-      - standardize names (trim/collapse whitespace),
-      - drop Unnamed:* or blank columns,
-      - drop fully empty columns,
-      - drop index-like first column (0..N or 1..N),
-      - ensure unique column names.
-    """
     try:
         ext = path.suffix.lower()
         if ext in (".xlsx", ".xls"):
             try:
-                xl = pd.ExcelFile(path)
+                xl = pd.ExcelFile(path, engine="openpyxl")
             except Exception as e:
                 console.print(f"[bold red]❌ Failed opening Excel file: {e}[/bold red]")
                 return None
 
-            # Pick sheet
             sheet_name = xl.sheet_names[0]
             if len(xl.sheet_names) > 1:
                 sheet_name = questionary.select("Select sheet:", choices=xl.sheet_names).ask()
@@ -211,13 +221,17 @@ def read_file_safely(path: Path) -> pd.DataFrame | None:
                     console.print("[blue]No sheet selected. Exiting.[/blue]")
                     return None
 
-            # Optional header auto-detect
             if questionary.confirm("Auto-detect the header row?", default=False).ask():
                 header_row = find_headers(path, sheet_name=sheet_name)
-                df = pd.read_excel(path, sheet_name=sheet_name,
-                                   header=(header_row if header_row is not None else 0))
             else:
-                df = pd.read_excel(path, sheet_name=sheet_name, header=0)
+                header_row = 0
+
+            try:
+                df = pd.read_excel(path, sheet_name=sheet_name, header=(header_row or 0), engine="openpyxl")
+            except Exception as e:
+                # last resort: read everything as text to bypass casting issues
+                console.print(f"[yellow]⚠ {e} — retrying as text-only load[/yellow]")
+                df = pd.read_excel(path, sheet_name=sheet_name, header=(header_row or 0), dtype=str, engine="openpyxl")
 
             return _clean_columns(df)
 
@@ -228,7 +242,7 @@ def read_file_safely(path: Path) -> pd.DataFrame | None:
                     return _clean_columns(df)
                 except Exception:
                     continue
-            console.print(f"[bold red]❌ Could not read CSV with common fallbacks.[/bold red]")
+            console.print("[bold red]❌ Could not read CSV with common fallbacks.[/bold red]")
             return None
 
         else:

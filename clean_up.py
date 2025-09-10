@@ -5,6 +5,7 @@ import questionary
 from rich.console import Console
 import os
 from utils.import_utils import read_file_safely
+from questionary import Choice
 
 
 console = Console()
@@ -29,22 +30,135 @@ def select_file_from_folder(directory):
 
 # === CLEAN-UP FUNCTIONS ===
 
-def clean_currency(series):
-    """Remove non-numeric except decimal and format with thousands separator."""
-    def fix_currency(val):
+def guess_currency_columns(df: pd.DataFrame) -> list[str]:
+    pat = re.compile(r"(amount|amt|fee|price|total|balance|nilai|nominal)", re.I)
+    return [c for c in df.columns if pat.search(str(c))]
+
+def guess_datetime_columns(df: pd.DataFrame) -> list[str]:
+    pat = re.compile(r"(date|datetime|time|created|updated|paid|settlement)", re.I)
+    return [c for c in df.columns if pat.search(str(c))]
+
+def prioritized_choices(all_cols, suggested):
+    suggested_set = set(map(str, suggested))
+    return (
+        [Choice(title=f"★ {c}", value=c, checked=True) for c in all_cols if str(c) in suggested_set] +
+        [Choice(title=str(c), value=c, checked=False) for c in all_cols if str(c) not in suggested_set]
+    )
+
+def clean_currency(series: pd.Series) -> pd.Series:
+    """
+    Robust currency normalizer:
+    - Handles IDR strings like 'Rp 1.234.567', 'IDR -577000', '(577,000)', '1,234.56', '1.234,56'
+    - Preserves negatives (leading '-' or parentheses)
+    - Normalizes decimal/thousand separators heuristically
+    - Formats as 'Rp 1,234,567' (no decimals; typical for IDR)
+    Leaves unparseable values as-is.
+    """
+    def parse_money(val):
         if pd.isna(val):
             return val
-        cleaned = re.sub(r"[^\d.]", "", str(val))
-        try:
-            num = float(cleaned)
-            return f"Rp {num:,.0f}"
-        except:
-            return val
-    return series.apply(fix_currency)
 
-def clean_datetime(series):
-    """Convert to standard YYYY-MM-DD HH:MM:SS format."""
-    return pd.to_datetime(series, errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+        s = str(val).strip()
+        if s == "":
+            return pd.NA
+
+        # Normalize unicode minus and trim
+        s = s.replace("\u2212", "-")  # unicode minus → ascii
+
+        # Detect parentheses negatives: (123,456)
+        neg = False
+        if s.startswith("(") and s.endswith(")"):
+            neg = True
+            s = s[1:-1].strip()
+
+        # Keep only digits, comma, dot, minus
+        s = re.sub(r"[^0-9,.\-]", "", s)
+
+        # If minus appears not only at start, keep the first and drop the rest
+        if s.count("-") > 1:
+            s = "-" + s.replace("-", "")
+
+        # Heuristics for separators
+        has_comma = "," in s
+        has_dot   = "." in s
+
+        normalized = s
+        if has_comma and has_dot:
+            # Decide which is decimal: look at last separator
+            last_comma = s.rfind(",")
+            last_dot   = s.rfind(".")
+            if last_comma > last_dot:
+                # 1.234,56 → '.' thousands, ',' decimal
+                normalized = s.replace(".", "").replace(",", ".")
+            else:
+                # 1,234.56 → ',' thousands, '.' decimal
+                normalized = s.replace(",", "")
+        elif has_comma and not has_dot:
+            # Could be thousands or decimal.
+            if s.count(",") > 1:
+                # many commas ⇒ thousands
+                normalized = s.replace(",", "")
+            else:
+                # single comma ⇒ treat as decimal
+                normalized = s.replace(",", ".")
+        elif has_dot and not has_comma:
+            # Many dots ⇒ thousands; keep last dot as decimal
+            if s.count(".") > 1:
+                # remove all dots, but keep the last as decimal if it looks like decimal
+                parts = s.split(".")
+                if parts[-1].isdigit() and 1 <= len(parts[-1]) <= 2:
+                    normalized = "".join(parts[:-1]) + "." + parts[-1]
+                else:
+                    normalized = s.replace(".", "")
+            else:
+                normalized = s
+
+        # Ensure single leading minus
+        neg = neg or normalized.startswith("-")
+        normalized = normalized.lstrip("-")
+
+        try:
+            num = float(normalized)
+            if neg:
+                num = -num
+            # IDR: no decimals
+            return f"Rp {abs(num):,.0f}" if num >= 0 else f"-Rp {abs(num):,.0f}"
+        except Exception:
+            # leave original if not parseable
+            return val
+
+    return series.apply(parse_money)
+
+
+def clean_datetime(series: pd.Series) -> pd.Series:
+    """
+    Parse mixed date/datetime strings.
+    - If the non-null parsed values all have time == 00:00:00 → format as YYYY-MM-DD
+    - Otherwise → format as YYYY-MM-DD HH:MM:SS
+    Keeps unparseable values as-is.
+    """
+    # Try mixed parsing; keep tz out for consistent strings
+    try:
+        parsed = pd.to_datetime(series, errors="coerce", utc=False)
+    except TypeError:
+        # older pandas without flexible parsing path
+        parsed = pd.to_datetime(series, errors="coerce")
+
+    # If nothing parsed, return original
+    if parsed.notna().sum() == 0:
+        return series
+
+    nonnull = parsed.dropna()
+    # If any value has a time component (not equal to midnight), treat as datetime column
+    has_time = (nonnull.dt.normalize() != nonnull).any()
+
+    fmt = "%Y-%m-%d %H:%M:%S" if has_time else "%Y-%m-%d"
+    out = parsed.dt.strftime(fmt)
+
+    # keep originals where parsing failed
+    out = out.where(parsed.notna(), series.astype(str))
+    return out
+
 
 def clean_phone(series):
     """Standardize Indonesian phone numbers."""
@@ -95,11 +209,20 @@ def main():
             continue
 
         if option == "Currency Formatting":
-            for col in col_choice:
-                df[col] = clean_currency(df[col])
+            sugg = guess_currency_columns(df)
+            console.print(f"[italic]Suggested currency-like columns:[/italic] {sugg or '— none detected —'}")
+            col_choice = questionary.checkbox(
+                "Select column(s) for Currency Formatting:",
+                choices=prioritized_choices(list(df.columns), sugg)
+            ).ask()
+
         elif option == "Datetime Formatting":
-            for col in col_choice:
-                df[col] = clean_datetime(df[col])
+            sugg = guess_datetime_columns(df)
+            console.print(f"[italic]Suggested date/datetime columns:[/italic] {sugg or '— none detected —'}")
+            col_choice = questionary.checkbox(
+                "Select column(s) for Datetime Formatting:",
+                choices=prioritized_choices(list(df.columns), sugg)
+            ).ask()
         elif option == "Phone Number Formatting":
             for col in col_choice:
                 df[col] = clean_phone(df[col])
