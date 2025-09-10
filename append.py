@@ -25,7 +25,7 @@ def select_multiple_data_files(folder: Path):
     if not files:
         console.print("[bold red]No Excel/CSV files in that folder.[/bold red]")
         return None
-    choices = questionary.checkbox("✅ Select files to append:", choices=files).ask()
+    choices = questionary.checkbox("✅ Select files to append (in order):", choices=files).ask()
     return choices if choices and len(choices) >= 2 else None
 
 # ───────────────────────────── Schema alignment ─────────────────────────────
@@ -114,7 +114,24 @@ def align_dataframes(dfs: dict[str, pd.DataFrame], selected_cols: list[str]) -> 
         aligned[name] = df[selected_cols].copy()  # order is exactly as selected_cols
     return aligned
 
-# ───────────────────────────── Append logic ─────────────────────────────
+# ───────────────────────────── Append modes ─────────────────────────────
+
+def select_append_mode() -> str:
+    """
+    Choose between:
+      - Check duplicates (unique by keys)
+      - Just append (no dedup)
+    """
+    return questionary.select(
+        "Append mode:",
+        choices=[
+            "Check duplicates (unique by selected key columns)",
+            "Just append (no deduplication)"
+        ],
+        default="Check duplicates (unique by selected key columns)"
+    ).ask()
+
+# ───────────────────────────── Export helper ─────────────────────────────
 
 def export_table(df: pd.DataFrame, folder: Path, default_name: str):
     if df is None or df.empty:
@@ -134,6 +151,8 @@ def export_table(df: pd.DataFrame, folder: Path, default_name: str):
     except Exception as e:
         console.print(f"[bold red]Failed to save: {e}[/bold red]")
 
+# ───────────────────────────── Core logic ─────────────────────────────
+
 def append_with_schema_resolution(folder: Path, files: list[str]):
     # Read all files first (preserve user-selected order)
     loaded: dict[str, pd.DataFrame] = {}
@@ -150,7 +169,7 @@ def append_with_schema_resolution(folder: Path, files: list[str]):
         console.print("[bold red]Need at least two readable files to append.[/bold red]")
         return
 
-    # Show a tiny peek for context
+    # Tiny peek for context
     console.print("\n[bold blue]Preview (first 5 rows) of first file:[/bold blue]")
     console.print(loaded[ordered_names[0]].head())
 
@@ -169,7 +188,17 @@ def append_with_schema_resolution(folder: Path, files: list[str]):
     # Align all dataframes to the chosen schema (order preserved)
     aligned = align_dataframes(loaded, selected_cols)
 
-    # Ask for unique columns (must be subset of selected_cols)
+    # Choose append behavior
+    append_mode = select_append_mode()
+
+    if append_mode.startswith("Just append"):
+        # Simple concat, no dedup, preserve file order and selected column order
+        combined = pd.concat([aligned[name] for name in ordered_names], ignore_index=True)
+        console.print(f"[bold green]✅ Appended {len(ordered_names)} files (no dedup). Final row count: {len(combined)}[/bold green]")
+        export_table(combined, folder, default_name="appended_raw")
+        return
+
+    # Check duplicates mode: ask for unique keys and de-duplicate
     while True:
         unique_columns = questionary.checkbox(
             "🔑 Select column(s) to define uniqueness:",
@@ -200,9 +229,8 @@ def append_with_schema_resolution(folder: Path, files: list[str]):
         # Keep unique
         base = combined.drop_duplicates(subset=unique_columns, keep="first")
 
-    console.print(f"[bold green]✅ Appending done. Final row count: {len(base)}[/bold green]")
-
-    export_table(base, folder, default_name="appended")
+    console.print(f"[bold green]✅ Appending done with duplicate check. Final row count: {len(base)}[/bold green]")
+    export_table(base, folder, default_name="appended_unique")
 
 # ───────────────────────────── Entrypoint ─────────────────────────────
 

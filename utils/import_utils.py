@@ -8,8 +8,6 @@ console = Console()
 
 # ───────────────────────── header detection ─────────────────────────
 
-# --- value-like detectors -------------------------------------------------
-
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _NUM_RE  = re.compile(r"^-?\d{1,3}([,.\s]\d{3})*([.,]\d+)?$|^-?\d+([.]\d+)?$")   # 123, 1,234.56, -577000
 _CARD_RE = re.compile(r"^\d{13,19}$")                                           # long IDs / card-like
@@ -25,24 +23,14 @@ def _looks_cardlike(s: str) -> bool:
     return bool(_CARD_RE.match(s))
 
 def _looks_datetimeish(s: str) -> bool:
-    # quick n’ dirty: ISO date/time fragments or explicit TZ markers
     if _TZ_RE.search(s):
         return True
-    # contain a yyyy-mm-dd pattern or time
     return bool(re.search(r"\b\d{4}-\d{2}-\d{2}\b", s)) or bool(re.search(r"\b\d{2}:\d{2}:\d{2}", s))
 
 def _has_letters(s: str) -> bool:
     return bool(re.search(r"[A-Za-z]", s))
 
-# --- smarter header detector ---------------------------------------------
-
 def find_headers(path: Path, sheet_name: str | int = 0, max_rows: int = 30) -> int | None:
-    """
-    Heuristic header detector:
-      • rewards rows with many non-null cells, high share of text, good uniqueness, and shortish labels
-      • penalizes rows with many numeric/UUID/datetime/cardlike tokens (i.e., data rows)
-    Returns 0-based row index, or None if nothing convincing is found.
-    """
     try:
         block = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=max_rows)
     except Exception as e:
@@ -64,22 +52,19 @@ def find_headers(path: Path, sheet_name: str | int = 0, max_rows: int = 30) -> i
         cardish = sum(_looks_cardlike(v) for v in nn_vals) / n
         dtlike  = sum(_looks_datetimeish(v) for v in nn_vals) / n
         uniq    = len(set(nn_vals)) / n
-        short   = sum(len(v) <= 35 for v in nn_vals) / n  # headers tend to be short labels
+        short   = sum(len(v) <= 35 for v in nn_vals) / n
 
-        # Score: more non-nulls + text + uniqueness, penalize value-like patterns
         score = (
             n * (1.0 + 1.6*textish + 0.5*uniq + 0.2*short)
             - n * (1.4*numeric + 1.0*dtlike + 1.2*uuidish + 0.8*cardish)
         )
 
-        # Hard guards: if row looks too “value-like”, discard
         if textish < 0.35 and (numeric + dtlike + uuidish + cardish) > 0.40:
             continue
 
         if score > best_score:
             best_score, best_idx = score, i
 
-    # If nothing convincing, return None (caller should fallback to header=0)
     if best_idx is None:
         console.print("[yellow]⚠ Could not confidently detect a header row; will fallback to header=0[/yellow]")
         return None
@@ -90,30 +75,26 @@ def find_headers(path: Path, sheet_name: str | int = 0, max_rows: int = 30) -> i
 # ───────────────────────── column cleaning ─────────────────────────
 
 def _standardize_col_name(name) -> str:
-    """Strip, collapse whitespace, keep readable (no snake-case)."""
     s = str(name).replace("\n", " ").replace("\r", " ").replace("\t", " ")
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def _ensure_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure column names are unique (foo, foo.1, foo.2 ...)."""
     seen: dict[str, int] = {}
     new_cols = []
     for c in df.columns:
         base = str(c)
         n = seen.get(base, 0)
-        if n == 0:
-            new = base
-        else:
-            new = f"{base}.{n}"
+        new = base if n == 0 else f"{base}.{n}"
         seen[base] = n + 1
         new_cols.append(new)
     df.columns = new_cols
     return df
 
-def _drop_unnamed_and_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
+def _drop_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Drop columns with names like 'Unnamed: *' (or blank) and columns that are entirely NaN.
+    Drop columns with names like 'Unnamed: *' (or blank).
+    NOTE: DOES NOT drop all-NaN columns anymore.
     """
     keep = []
     for c in df.columns:
@@ -121,42 +102,26 @@ def _drop_unnamed_and_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
         is_unnamed = (name == "") or re.match(r"^unnamed[:\s]*", name, flags=re.I)
         if is_unnamed:
             continue
-        if df[c].isna().all():
-            continue
         keep.append(c)
     return df[keep]
 
 def _looks_like_sequential_index(s: pd.Series) -> bool:
-    """
-    True if s looks like a saved index column (0..N-1 or 1..N), ignoring NaNs.
-    Uses safe Python int conversion instead of dtype casts.
-    """
     if s is None or len(s) == 0:
         return False
-
-    v = pd.to_numeric(s, errors="coerce")  # float series with NaNs
-    v = v.dropna()
+    v = pd.to_numeric(s, errors="coerce").dropna()
     if v.empty:
         return False
-
-    # Must be whole numbers only (no fractions)
     if not ((v % 1) == 0).all():
         return False
-
-    # Convert to Python ints safely (avoids pandas int casting issues)
     try:
         ints = [int(x) for x in v.tolist()]
     except Exception:
         return False
-
-    # No duplicates allowed
     if len(ints) != len(set(ints)):
         return False
-
-    n = len(s)            # full column length (including NaNs)
+    n = len(s)
     mn, mx = min(ints), max(ints)
     setv = set(ints)
-
     return (
         (mn == 0 and mx == n - 1 and setv == set(range(0, n))) or
         (mn == 1 and mx == n and setv == set(range(1, n + 1)))
@@ -164,41 +129,35 @@ def _looks_like_sequential_index(s: pd.Series) -> bool:
 
 def _auto_drop_index_like_first_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Automatically drop the first column if it looks like a saved index OR is empty.
-    Never crash: on any error, keep the column.
+    Auto-drop first column ONLY if it looks like a saved index OR its name is index-ish/Unnamed.
+    Does NOT drop just because it's empty.
     """
     if df.shape[1] == 0:
         return df
     try:
         first_name = str(df.columns[0]).strip()
         first_col = df.iloc[:, 0]
-        is_empty = first_col.isna().all()
         name_indexy = (
             (first_name == "") or
             re.match(r"^unnamed[:\s]*", first_name, flags=re.I) or
             first_name.lower() in {"index", "idx", "row", "rows"}
         )
-        if is_empty or name_indexy or _looks_like_sequential_index(first_col):
+        if name_indexy or _looks_like_sequential_index(first_col):
             return df.iloc[:, 1:].copy()
         return df
     except Exception:
-        # If detection fails for any reason, keep the column
         return df
 
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Standardize names, drop junk (unnamed/all-NaN), drop index-like first column,
-    then re-run cleanup and ensure uniqueness.
+    Standardize names, drop unnamed columns, drop index-like first column,
+    then ensure unique column names. (Empty columns are preserved.)
     """
-    # standardize names
     df = df.rename(columns={c: _standardize_col_name(c) for c in df.columns})
-    # drop obvious junk
-    df = _drop_unnamed_and_empty_columns(df)
-    # auto-drop saved index first col if present
+    df = _drop_unnamed_columns(df)
     df = _auto_drop_index_like_first_column(df)
-    # in case the first col drop exposed another unnamed/empty col, clean again
-    df = _drop_unnamed_and_empty_columns(df)
-    # ensure unique names
+    # a second pass in case dropping the first column exposes another 'Unnamed'
+    df = _drop_unnamed_columns(df)
     df = _ensure_unique_columns(df)
     return df
 
@@ -229,7 +188,6 @@ def read_file_safely(path: Path) -> pd.DataFrame | None:
             try:
                 df = pd.read_excel(path, sheet_name=sheet_name, header=(header_row or 0), engine="openpyxl")
             except Exception as e:
-                # last resort: read everything as text to bypass casting issues
                 console.print(f"[yellow]⚠ {e} — retrying as text-only load[/yellow]")
                 df = pd.read_excel(path, sheet_name=sheet_name, header=(header_row or 0), dtype=str, engine="openpyxl")
 
